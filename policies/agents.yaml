@@ -1,0 +1,21 @@
+# Anything not listed is denied. Every tool needs a JSON Schema (validated at startup).
+agents:
+  research-bot:
+    tools:
+      web_fetch:
+        schema:
+          type: object
+          properties:
+            url: { type: string, pattern: "^https://" }
+          required: [url]
+          additionalProperties: false
+        rate_limit: 30/min
+      shell:
+        schema:
+          type: object
+          properties:
+            cmd: { type: string, maxLength: 200 }
+          required: [cmd]
+          additionalProperties: false
+        rate_limit: 5/min
+        approval: required   # human must approve each call
