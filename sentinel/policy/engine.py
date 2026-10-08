@@ -34,7 +34,17 @@ class PolicyEngine:
                 if "schema" not in spec:  # fail closed at load, not at call time
                     raise ValueError(f"{agent}.{tool}: 'schema' is required")
                 Draft202012Validator.check_schema(spec["schema"])
+                sb = spec.get("sandbox")
+                if sb is not None and not (sb.get("image") and isinstance(sb.get("command"), list)):
+                    raise ValueError(f"{agent}.{tool}: sandbox needs 'image' and a 'command' list")
+                if sb is not None and sb.get("network", "none") not in ("none", "proxy"):
+                    raise ValueError(f"{agent}.{tool}: sandbox.network must be none or proxy")
+                if spec.get("secrets") and sb is None:
+                    raise ValueError(f"{agent}.{tool}: 'secrets' requires a sandbox")
                 self._tools[(agent, tool)] = {
+                    "sandbox": sb,
+                    "secrets": list(spec.get("secrets") or []),
+                    "token_ttl": int(spec.get("token_ttl", 60)),
                     "validator": Draft202012Validator(spec["schema"]),
                     "rate": _rate(spec["rate_limit"]) if "rate_limit" in spec else None,
                     "approval": spec.get("approval") == "required",
@@ -76,6 +86,13 @@ class PolicyEngine:
             if rec["state"] == "approved":
                 return ToolDecision(decision="allow", reason="human approved")
             return ToolDecision(decision="deny", reason="human denied")
+
+    def exec_spec(self, agent: str, tool: str) -> dict | None:
+        """Sandbox config for a tool, or None if it is unknown or has no sandbox (so /run denies it)."""
+        spec = self._tools.get((agent, tool))
+        if not spec or spec["sandbox"] is None:
+            return None
+        return {"sandbox": spec["sandbox"], "secrets": spec["secrets"], "token_ttl": spec["token_ttl"]}
 
     def resolve(self, approval_id: str, approve: bool) -> bool:
         with self._lock:

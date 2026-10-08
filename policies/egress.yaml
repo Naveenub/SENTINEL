@@ -1,0 +1,5 @@
+# Hosts a sandbox with network=proxy may reach (HTTPS only). Exact names or "*.suffix".
+allow:
+  - pypi.org
+  - files.pythonhosted.org
+  - api.github.com

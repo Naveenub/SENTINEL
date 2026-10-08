@@ -19,3 +19,19 @@ agents:
           additionalProperties: false
         rate_limit: 5/min
         approval: required   # human must approve each call
+      summarize_report:
+        schema:
+          type: object
+          properties:
+            text: { type: string, maxLength: 10000 }
+          required: [text]
+          additionalProperties: false
+        rate_limit: 10/min
+        secrets: [reports:read]     # a short-lived scoped token is injected as SENTINEL_TOKEN
+        token_ttl: 30
+        sandbox:
+          image: python:3.12-slim
+          command: ["python", "-c", "import sys; print(sys.stdin.read()[:200])"]
+          network: none             # or "proxy" for allowlisted egress
+          timeout: 10
+          memory: 256m

@@ -37,3 +37,12 @@ class ToolDecision(BaseModel):
     decision: Literal["allow", "deny", "pending"]
     reason: str
     approval_id: str | None = None
+
+
+class RunResponse(BaseModel):
+    decision: Literal["allow", "deny", "pending"]
+    reason: str
+    approval_id: str | None = None
+    exit_code: int | None = None
+    output: str | None = None  # scanned, wrapped as <untrusted>; None if withheld
+    findings: list[str] = Field(default_factory=list)

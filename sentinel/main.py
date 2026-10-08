@@ -4,17 +4,19 @@ import os
 from fastapi import Depends, FastAPI, Header, HTTPException
 
 from sentinel.audit.log import AuditLog
-from sentinel.models import ScanRequest, ScanResponse, ToolDecision, ToolRequest
+from sentinel.models import RunResponse, ScanRequest, ScanResponse, ToolDecision, ToolRequest
 from sentinel.pipeline import Pipeline
 from sentinel.policy.engine import PolicyEngine
+from sentinel.sandbox.runner import Sandbox
+from sentinel.secrets.broker import TokenBroker
 
 
-def create_app() -> FastAPI:
+def create_app(sandbox: Sandbox | None = None) -> FastAPI:
     key = os.environ["SENTINEL_AUDIT_KEY"].encode()  # KeyError = refuse to start
     admin_token = os.environ["SENTINEL_ADMIN_TOKEN"].encode()
     log = AuditLog(os.getenv("SENTINEL_AUDIT_DB", "sentinel_audit.db"), key)
     engine = PolicyEngine(os.getenv("SENTINEL_POLICY", "policies/agents.yaml"))
-    pipe = Pipeline(engine, log)
+    pipe = Pipeline(engine, log, sandbox or Sandbox(), TokenBroker(key))
 
     app = FastAPI(title="SENTINEL")
     app.state.log = log
@@ -34,6 +36,10 @@ def create_app() -> FastAPI:
     @app.post("/v1/tool/authorize", response_model=ToolDecision)
     def authorize(req: ToolRequest):
         return pipe.authorize(req)
+
+    @app.post("/v1/tool/run", response_model=RunResponse)
+    def run(req: ToolRequest):
+        return pipe.run(req)
 
     @app.get("/v1/approvals", dependencies=[Depends(admin)])
     def approvals():
