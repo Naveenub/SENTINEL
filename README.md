@@ -12,7 +12,7 @@
 
 A defense gateway that sits between **untrusted input**, the **model**, and **tools**. Every prompt, tool call, and output passes through five layers before anything touches the outside world.
 
-> **Status:** all five layers are built and tested: 154 tests (155 with the `opa` binary on PATH) plus a red-team corpus (11 documented detection gaps tracked as strict expected-failures). promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
+> **Status:** all five layers are built and tested: 170 tests (171 with the `opa` binary on PATH) plus a red-team corpus (11 documented detection gaps tracked as strict expected-failures). promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
 >
 > **ML classifier backends (NVIDIA JailbreakDetect NIM, Meta Prompt Guard 2) are implemented but not measured against real models.** I could not download models or reach an NIM from the build environment. The NIM client is tested against a local server implementing NVIDIA's documented API, and Prompt Guard against a stand-in pipeline. Run `scripts/eval_classifier.py` on your machine to get real numbers before relying on either.
 >
@@ -99,6 +99,7 @@ sentinel/
 │   │       ├── nim.py             # NVIDIA NemoGuard JailbreakDetect NIM client
 │   │       ├── prompt_guard.py    # Meta Llama Prompt Guard 2 (local, via transformers)
 │   │       └── chunking.py        # overlapping windows; oversize input raises, never truncates
+│   ├── auth.py                    # optional per-agent tokens for the agent-facing endpoints
 │   ├── policy/                    # L2
 │   │   ├── engine.py              # allowlist, JSON-schema args, host allowlist, rate limit, approval, preflight
 │   │   ├── approvals.py           # SQLite-backed human-approval records (TTL, pending cap)
@@ -375,6 +376,28 @@ scripts/garak_scan.sh proxy  <model>         # through SENTINEL as agent "garak-
 
 garak scores model behaviour, so a result is "model + SENTINEL", not SENTINEL alone. The rules-only L1 will miss many garak probes (encodings, paraphrase); run with a classifier backend for a meaningful number.
 
+### 15. Agent authentication (optional)
+
+By default the agent-facing endpoints trust whoever can reach them, so you bind to localhost. To close that gap, give each agent its own token:
+
+```bash
+export SENTINEL_AGENT_TOKENS="research-bot=$(openssl rand -hex 24),garak-target=$(openssl rand -hex 24)"
+# or SENTINEL_AGENT_TOKENS_FILE=tokens.json:  {"research-bot": ["<new>", "<old>"], "garak-target": "<token>"}   (a list = rotation)
+```
+
+With tokens set, `/v1/scan`, `/v1/tool/authorize`, `/v1/tool/run` and the model proxy all require a token **that belongs to the agent being claimed**, so agent A cannot borrow agent B's policy, rate limits, approvals or audit identity (401 for a missing or invalid token, 403 for a valid token used for another agent). Send it as `Authorization: Bearer`, `x-api-key` or `X-Sentinel-Agent-Token`; for the proxy that means the SDK's own `api_key` is the agent token (the proxy never forwards it upstream):
+
+```python
+OpenAI(base_url="http://127.0.0.1:8080/proxy/research-bot/v1", api_key=AGENT_TOKEN)
+Anthropic(base_url="http://127.0.0.1:8080/proxy/research-bot", api_key=AGENT_TOKEN)
+# on the root routes (/v1/chat/completions, /v1/messages) X-Sentinel-Agent can be omitted: the token identifies the agent
+```
+
+- **Fail closed.** An agent with no token configured cannot authenticate once auth is on. Startup refuses tokens that are under 16 characters, name an agent missing from policy, are shared by two agents, or equal the admin or verifier token (an agent must not be able to approve its own requests).
+- **Still open:** `/healthz`. Admin and verifier endpoints keep their own credentials, which an agent token does not satisfy.
+- **Audit.** Failures are logged as `auth` events (agent claimed, reason, client address, path; never the token), at most one per agent, reason and client every 10 seconds so an unauthenticated caller cannot flood the log. No alert rule watches them yet.
+- **Not provided:** TLS (tokens are bearer secrets, so use localhost, a TLS-terminating proxy or a private network), per-token expiry, and rate limiting of failed attempts.
+
 ---
 
 ## Integrations and standards
@@ -388,7 +411,7 @@ garak scores model behaviour, so a result is "model + SENTINEL", not SENTINEL al
 | OPA | Optional L2 decision backend (section 12), tested against a real OPA server |
 | Regulated-industry expectations | Fail-closed defaults, separation of duties (agents cannot approve), single-use bound approvals, tamper-evident audit, content hashed in logs by default |
 
-Known limits: the ML backends are unmeasured on real models (see the status note), and a classifier is itself attackable, so keep L2 to L4 in place. Alerts **notify, they do not block** (a deny/approve decision is still L2's job). Per-tool `allowed_hosts` checks URLs inside args only, not bare hostnames. Detector learning periods are call-count based. The rule-based L1 misses paraphrase, encoded, foreign-language and homoglyph attacks (see the red-team corpus) and has known false positives; use the classifier hook for those. Tokens are signed bearer tokens capped at 5 minutes; revocation is enforced only for verifiers that call `/v1/token/verify` (offline verification with the shared key cannot see it) and services must trust the SENTINEL key. The model proxy streams only in buffered mode (no latency benefit) and does not scan non-text content. The egress proxy is HTTPS-only. Credential detection is pattern-based, so unknown formats can slip through. HMAC signing is symmetric and tail truncation of the log is not detectable from the file alone (anchor `head` off-box for stronger guarantees). Agent-facing endpoints have no auth, so bind to localhost or put them behind your own network controls.
+Known limits: the ML backends are unmeasured on real models (see the status note), and a classifier is itself attackable, so keep L2 to L4 in place. Alerts **notify, they do not block** (a deny/approve decision is still L2's job). Per-tool `allowed_hosts` checks URLs inside args only, not bare hostnames. Detector learning periods are call-count based. The rule-based L1 misses paraphrase, encoded, foreign-language and homoglyph attacks (see the red-team corpus) and has known false positives; use the classifier hook for those. Tokens are signed bearer tokens capped at 5 minutes; revocation is enforced only for verifiers that call `/v1/token/verify` (offline verification with the shared key cannot see it) and services must trust the SENTINEL key. The model proxy streams only in buffered mode (no latency benefit) and does not scan non-text content. The egress proxy is HTTPS-only. Credential detection is pattern-based, so unknown formats can slip through. HMAC signing is symmetric and tail truncation of the log is not detectable from the file alone (anchor `head` off-box for stronger guarantees). Agent-facing endpoints have no auth unless you set `SENTINEL_AGENT_TOKENS` (section 15); without it, bind to localhost or put them behind your own network controls. Agent tokens are plain bearer secrets with no TLS, expiry or lockout.
 
 ---
 

@@ -1,10 +1,12 @@
 import hmac
 import os
+import time
 
-from fastapi import Body, Depends, FastAPI, Header, HTTPException
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from sentinel.auth import AgentAuth
 from sentinel.audit.alerts import log_sink, webhook_sink
 from sentinel.audit.detect import Detector
 from sentinel.audit.log import AuditLog
@@ -63,6 +65,7 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
     log.subscribe(on_event)
     broker = TokenBroker(key, RevocationStore(os.getenv("SENTINEL_REVOKE_DB", os.getenv("SENTINEL_AUDIT_DB", "sentinel_audit.db"))))
     verifier_token = os.getenv("SENTINEL_VERIFIER_TOKEN", "").encode()
+    auth = AgentAuth.from_env(engine.agent_names, [admin_token, verifier_token])  # None = auth off
     pipe = Pipeline(engine, log, sandbox or Sandbox(), broker, classifier)
     proxy = proxy_from_env(pipe, model_client)
 
@@ -81,6 +84,51 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
         if not ok:
             raise HTTPException(403, "admin or verifier token required")
 
+    # ---- optional per-agent auth (SENTINEL_AGENT_TOKENS / _FILE); a no-op when not configured
+    class _AuthFail(Exception):
+        def __init__(self, status: int, code: str, msg: str, api: str | None):
+            self.status, self.code, self.msg, self.api = status, code, msg, api
+
+    @app.exception_handler(_AuthFail)
+    def _auth_failed(_: Request, e: _AuthFail):
+        body = FORMATS[e.api].error(e.status, e.code, e.msg) if e.api else {"detail": e.msg}
+        return JSONResponse(body, status_code=e.status, headers={"WWW-Authenticate": "Bearer"} if e.status == 401 else None)
+
+    _auth_seen: dict[tuple, float] = {}
+
+    def _auth_audit(request: Request, claimed: str, reason: str) -> None:
+        """One audit entry per (agent, reason, client) per 10s, so an unauthenticated caller cannot flood the log.
+        The token itself is never recorded."""
+        client = request.client.host if request.client else "?"
+        k, now = (claimed[:64], reason, client), time.monotonic()
+        if now - _auth_seen.get(k, -1e18) < 10:
+            return
+        if len(_auth_seen) > 1024:
+            _auth_seen.clear()
+        _auth_seen[k] = now
+        log.append({"type": "auth", "decision": "deny", "agent": claimed[:64], "reason": reason,
+                    "client": client, "path": request.url.path})
+
+    def _agent_auth(api: str | None = None):
+        def dep(request: Request) -> str | None:
+            if auth is None:
+                return None
+            who, presented = auth.identify(request.headers)
+            if who is None:
+                reason = "invalid agent token" if presented else "missing agent token"
+                _auth_audit(request, str(request.path_params.get("agent") or request.headers.get("x-sentinel-agent") or ""), reason)
+                raise _AuthFail(401, "unauthorized", "a valid agent token is required", api)
+            return who
+        return dep
+
+    def _bind(who: str | None, claimed: str, request: Request, api: str | None = None) -> None:
+        """The token authenticates `who`; it may only act as that agent."""
+        if auth is not None and who != claimed:
+            _auth_audit(request, claimed, f"token belongs to a different agent ({who})")
+            raise _AuthFail(403, "agent_mismatch", "this token is not valid for that agent", api)
+
+    plain_auth, oai_auth, ant_auth = _agent_auth(), _agent_auth("openai"), _agent_auth("anthropic")
+
     @app.get("/healthz")
     def healthz():
         c = pipe.classifier
@@ -89,15 +137,18 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
                 "model_proxy": bool(proxy)}
 
     @app.post("/v1/scan", response_model=ScanResponse)
-    def scan(req: ScanRequest):
+    def scan(req: ScanRequest, request: Request, who=Depends(plain_auth)):
+        _bind(who, req.agent, request)
         return pipe.scan(req)
 
     @app.post("/v1/tool/authorize", response_model=ToolDecision)
-    def authorize(req: ToolRequest):
+    def authorize(req: ToolRequest, request: Request, who=Depends(plain_auth)):
+        _bind(who, req.agent, request)
         return pipe.authorize(req)
 
     @app.post("/v1/tool/run", response_model=RunResponse)
-    def run(req: ToolRequest):
+    def run(req: ToolRequest, request: Request, who=Depends(plain_auth)):
+        _bind(who, req.agent, request)
         return pipe.run(req)
 
     # ---- token revocation (L4)
@@ -130,21 +181,31 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
         def _need_agent(api: str):
             return JSONResponse(FORMATS[api].error(400, "missing_agent", "X-Sentinel-Agent header required"), status_code=400)
 
-        @app.post("/v1/chat/completions")
-        def chat_header(body: dict = Body(...), x_sentinel_agent: str = Header(default="")):
-            return _call(x_sentinel_agent, body, "openai", "") if x_sentinel_agent else _need_agent("openai")
+        @app.post("/v1/chat/completions")  # with auth on, the agent defaults to the token's owner
+        def chat_header(request: Request, body: dict = Body(...), x_sentinel_agent: str = Header(default=""),
+                        who=Depends(oai_auth)):
+            agent = x_sentinel_agent or who
+            if agent:
+                _bind(who, agent, request, "openai")
+            return _call(agent, body, "openai", "") if agent else _need_agent("openai")
 
         @app.post("/proxy/{agent}/v1/chat/completions")  # OpenAI base_url: http://gw/proxy/<agent>/v1
-        def chat_path(agent: str, body: dict = Body(...)):
+        def chat_path(agent: str, request: Request, body: dict = Body(...), who=Depends(oai_auth)):
+            _bind(who, agent, request, "openai")
             return _call(agent, body, "openai", "")
 
         @app.post("/v1/messages")
-        def messages_header(body: dict = Body(...), x_sentinel_agent: str = Header(default=""),
-                            anthropic_version: str = Header(default="")):
-            return _call(x_sentinel_agent, body, "anthropic", anthropic_version) if x_sentinel_agent else _need_agent("anthropic")
+        def messages_header(request: Request, body: dict = Body(...), x_sentinel_agent: str = Header(default=""),
+                            anthropic_version: str = Header(default=""), who=Depends(ant_auth)):
+            agent = x_sentinel_agent or who
+            if agent:
+                _bind(who, agent, request, "anthropic")
+            return _call(agent, body, "anthropic", anthropic_version) if agent else _need_agent("anthropic")
 
         @app.post("/proxy/{agent}/v1/messages")  # Anthropic base_url: http://gw/proxy/<agent>
-        def messages_path(agent: str, body: dict = Body(...), anthropic_version: str = Header(default="")):
+        def messages_path(agent: str, request: Request, body: dict = Body(...), anthropic_version: str = Header(default=""),
+                          who=Depends(ant_auth)):
+            _bind(who, agent, request, "anthropic")
             return _call(agent, body, "anthropic", anthropic_version)
 
     @app.get("/v1/approvals", dependencies=[Depends(admin)])

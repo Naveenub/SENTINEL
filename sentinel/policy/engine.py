@@ -62,6 +62,10 @@ class PolicyEngine:
     def has_agent(self, agent: str) -> bool:
         return agent in self._agents
 
+    @property
+    def agent_names(self) -> set[str]:
+        return set(self._agents)
+
     def _check(self, agent: str, tool: str, args: dict) -> tuple[ToolDecision | None, bool]:
         """Side-effect-free checks: allowlist -> schema -> hosts -> OPA. Returns (deny | None, approval_needed)."""
         spec = self._tools.get((agent, tool))

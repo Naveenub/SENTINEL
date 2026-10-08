@@ -4,12 +4,13 @@
 #   scripts/garak_scan.sh direct <model> [spec]    # straight to the upstream (baseline)
 # Run the gateway with SENTINEL_PROXY_BLOCK_MODE=refusal so blocks look like model refusals to garak
 # (in the default "error" mode garak sees HTTP 403 and aborts the probe).
+# If the gateway has SENTINEL_AGENT_TOKENS set, export SENTINEL_AGENT_TOKEN=<garak-target token> for proxy mode.
 # Compare the two reports: the difference is what SENTINEL blocks. Requires: pip install garak
 set -euo pipefail
 mode=${1:?proxy|direct}; model=${2:?model name}
 spec=${3:-probes.promptinject,probes.encoding,probes.latentinjection,probes.dan}
 case "$mode" in
-  proxy)  uri="${SENTINEL_GATEWAY:-http://127.0.0.1:8080}/proxy/garak-target/v1/"; key="unused" ;;
+  proxy)  uri="${SENTINEL_GATEWAY:-http://127.0.0.1:8080}/proxy/garak-target/v1/"; key="${SENTINEL_AGENT_TOKEN:-unused}" ;;  # token only if agent auth is on
   direct) uri="${UPSTREAM_URI:?set UPSTREAM_URI, e.g. https://api.openai.com/v1/}"; key="${UPSTREAM_KEY:?set UPSTREAM_KEY}" ;;
   *) echo "mode must be proxy or direct" >&2; exit 2 ;;
 esac
