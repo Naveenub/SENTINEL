@@ -262,7 +262,7 @@ Note: **Llama Guard** (Meta's generative content-safety model) is a different to
 ```bash
 export SENTINEL_CLASSIFIER=prompt_guard          # or nim, or nim,prompt_guard (ensemble: highest score wins)
 export SENTINEL_CLASSIFIER_ON_ERROR=closed       # default
-curl localhost:8080/healthz                      # shows which classifier is active
+curl -H "X-Sentinel-Admin-Token: $SENTINEL_ADMIN_TOKEN" localhost:8080/v1/status   # shows which classifier is active
 python scripts/eval_classifier.py                # measure it on the red-team corpus
 ```
 
@@ -394,7 +394,7 @@ Anthropic(base_url="http://127.0.0.1:8080/proxy/research-bot", api_key=AGENT_TOK
 ```
 
 - **Fail closed.** An agent with no token configured cannot authenticate once auth is on. Startup refuses tokens that are under 16 characters, name an agent missing from policy, are shared by two agents, or equal the admin or verifier token (an agent must not be able to approve its own requests).
-- **Still open:** `/healthz`. Admin and verifier endpoints keep their own credentials, which an agent token does not satisfy.
+- **Still open:** `/healthz`, which returns only `{"ok": true}` (liveness for load balancers and Docker health checks). Classifier, fail mode, policy backend and proxy state are served at `GET /v1/status` with the admin token. Admin and verifier endpoints keep their own credentials, which an agent token does not satisfy.
 - **Audit.** Failures are logged as `auth` events (agent claimed, reason, client address, path; never the token), at most one per agent, reason and client every 10 seconds so an unauthenticated caller cannot flood the log. No alert rule watches them yet.
 - **Not provided:** TLS (tokens are bearer secrets, so use localhost, a TLS-terminating proxy or a private network), per-token expiry, and rate limiting of failed attempts.
 

@@ -186,4 +186,4 @@ def test_proxy_not_mounted_without_upstream(tmp_path, monkeypatch):
     monkeypatch.setenv("SENTINEL_POLICY", POLICY)
     monkeypatch.delenv("SENTINEL_UPSTREAM_URL", raising=False)
     c = TestClient(create_app())
-    assert c.post(BASE, json={}).status_code == 404 and c.get("/healthz").json()["model_proxy"] is False
+    assert c.post(BASE, json={}).status_code == 404 and c.get("/v1/status", headers=ADMIN).json()["model_proxy"] is False

@@ -3,7 +3,7 @@
 Off unless tokens are configured. When on, every agent-facing endpoint (/v1/scan, /v1/tool/*, and the
 model proxy) requires a token that belongs to the agent it claims to act as, so agent A cannot use
 agent B's policy, rate limits, approvals or audit identity. Admin and verifier endpoints keep their own
-credentials; /healthz stays open.
+credentials; /healthz stays open but reports only {"ok": true}.
 
 Configure with SENTINEL_AGENT_TOKENS="research-bot=<token>,garak-target=<token>" and/or
 SENTINEL_AGENT_TOKENS_FILE=<json>, e.g. {"research-bot": "<token>", "garak-target": ["<new>", "<old>"]}

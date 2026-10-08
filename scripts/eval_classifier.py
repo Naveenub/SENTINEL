@@ -20,7 +20,8 @@ os.environ.setdefault("SENTINEL_POLICY", str(root / "policies" / "agents.yaml"))
 from sentinel.main import create_app  # noqa: E402
 
 c = TestClient(create_app())
-print("classifier:", c.get("/healthz").json()["classifier"] or "none (rules only)")
+ADMIN = {"X-Sentinel-Admin-Token": os.environ["SENTINEL_ADMIN_TOKEN"]}
+print("classifier:", c.get("/v1/status", headers=ADMIN).json()["classifier"] or "none (rules only)")
 cases = yaml.safe_load((root / "tests/redteam/cases/injection.yaml").read_text())
 
 

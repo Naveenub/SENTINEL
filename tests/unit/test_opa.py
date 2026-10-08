@@ -122,4 +122,4 @@ def test_real_opa_policy(tmp_path, monkeypatch, real_opa):
     assert call(c, "shell", {"cmd": "ls"})["decision"] == "pending"
     d = call(c, "shell", {"cmd": "rm -rf /tmp/x"})
     assert d["decision"] == "deny" and "recursive delete" in d["reason"]
-    assert c.get("/healthz").json()["policy_backend"] == "opa"
+    assert c.get("/v1/status", headers={"X-Sentinel-Admin-Token": "adm"}).json()["policy_backend"] == "opa"

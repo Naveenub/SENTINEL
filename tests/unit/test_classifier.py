@@ -216,9 +216,9 @@ def test_classifier_failure_open_mode_degrades_to_rules_but_alerts(env, monkeypa
     assert "classifier_degraded" in [a["rule"] for a in c.get("/v1/alerts", headers=ADMIN).json()]
 
 
-def test_bad_on_error_value_rejected_and_healthz_reports_classifier(env, monkeypatch):
-    assert TestClient(create_app(classifier=Flagger())).get("/healthz").json()["classifier"] == "flagger"
-    assert TestClient(create_app()).get("/healthz").json()["classifier"] is None
+def test_bad_on_error_value_rejected_and_status_reports_classifier(env, monkeypatch):
+    assert TestClient(create_app(classifier=Flagger())).get("/v1/status", headers=ADMIN).json()["classifier"] == "flagger"
+    assert TestClient(create_app()).get("/v1/status", headers=ADMIN).json()["classifier"] is None
     monkeypatch.setenv("SENTINEL_CLASSIFIER_ON_ERROR", "maybe")
     with pytest.raises(ValueError):
         create_app()

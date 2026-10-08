@@ -131,6 +131,13 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
 
     @app.get("/healthz")
     def healthz():
+        """Liveness only, for load balancers and Docker health checks. Deliberately reveals nothing about
+        configuration: classifier, fail mode and policy backend would tell an unauthenticated caller how
+        input screening is set up. Detail lives at /v1/status behind the admin token."""
+        return {"ok": True}
+
+    @app.get("/v1/status", dependencies=[Depends(admin)])
+    def status():
         c = pipe.classifier
         return {"ok": True, "classifier": getattr(c, "name", type(c).__name__) if c else None,
                 "classifier_on_error": pipe.on_error, "policy_backend": "opa" if opa else "yaml",

@@ -84,6 +84,12 @@ def test_token_cannot_act_as_another_agent(make):
 def test_open_endpoints_and_separate_admin_credential(make):
     c = make()
     assert c.get("/healthz").status_code == 200
+    assert c.get("/healthz").json() == {"ok": True}   # liveness only: no classifier, fail mode or backend detail
+    assert c.get("/healthz?detail=1").json() == {"ok": True}   # a query flag does not unlock detail
+    assert c.get("/v1/status").status_code == 403
+    assert c.get("/v1/status", headers=bearer(RB)).status_code == 403   # an agent token is not an admin token
+    st = c.get("/v1/status", headers=ADMIN).json()
+    assert st["ok"] is True and {"classifier", "classifier_on_error", "policy_backend", "model_proxy"} <= st.keys()
     assert c.get("/v1/approvals", headers=ADMIN).status_code == 200
     assert c.get("/v1/approvals", headers=bearer(RB)).status_code == 403   # an agent token is not an admin token
     assert c.get("/v1/approvals", headers={"X-Sentinel-Admin-Token": RB}).status_code == 403
