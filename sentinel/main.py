@@ -13,7 +13,7 @@ from sentinel.sandbox.runner import Sandbox
 from sentinel.secrets.broker import TokenBroker
 
 
-def create_app(sandbox: Sandbox | None = None) -> FastAPI:
+def create_app(sandbox: Sandbox | None = None, classifier=None) -> FastAPI:
     key = os.environ["SENTINEL_AUDIT_KEY"].encode()  # KeyError = refuse to start
     admin_token = os.environ["SENTINEL_ADMIN_TOKEN"].encode()
     log = AuditLog(os.getenv("SENTINEL_AUDIT_DB", "sentinel_audit.db"), key)
@@ -32,7 +32,7 @@ def create_app(sandbox: Sandbox | None = None) -> FastAPI:
                 s(a)
 
     log.subscribe(on_event)
-    pipe = Pipeline(engine, log, sandbox or Sandbox(), TokenBroker(key))
+    pipe = Pipeline(engine, log, sandbox or Sandbox(), TokenBroker(key), classifier)
 
     app = FastAPI(title="SENTINEL")
     app.state.log = log
@@ -44,7 +44,9 @@ def create_app(sandbox: Sandbox | None = None) -> FastAPI:
 
     @app.get("/healthz")
     def healthz():
-        return {"ok": True}
+        c = pipe.classifier
+        return {"ok": True, "classifier": getattr(c, "name", type(c).__name__) if c else None,
+                "classifier_on_error": pipe.on_error}
 
     @app.post("/v1/scan", response_model=ScanResponse)
     def scan(req: ScanRequest):

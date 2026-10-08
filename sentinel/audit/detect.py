@@ -45,6 +45,8 @@ class Detector:
         if kind == "scan":
             if ev.get("verdict") == "block":
                 self._last_block[agent] = now
+            if any(str(f.get("rule", "")).startswith("classifier_") for f in ev.get("findings", [])):
+                alert("classifier_degraded", "high", "ML classifier failed; input screening may be rules-only")
             return out if emit else []
 
         denied = ev.get("decision") == "deny"

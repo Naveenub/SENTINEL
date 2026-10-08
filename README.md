@@ -12,7 +12,9 @@
 
 A defense gateway that sits between **untrusted input**, the **model**, and **tools**. Every prompt, tool call, and output passes through five layers before anything touches the outside world.
 
-> **Status:** all five layers are built and tested: 69 tests plus a red-team corpus (11 documented detection gaps tracked as strict expected-failures). promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
+> **Status:** all five layers are built and tested: 85 tests plus a red-team corpus (11 documented detection gaps tracked as strict expected-failures). promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
+>
+> **ML classifier backends (NVIDIA JailbreakDetect NIM, Meta Prompt Guard 2) are implemented but not measured against real models.** I could not download models or reach an NIM from the build environment. The NIM client is tested against a local server implementing NVIDIA's documented API, and Prompt Guard against a stand-in pipeline. Run `scripts/eval_classifier.py` on your machine to get real numbers before relying on either.
 >
 > It is a **decision API**: your agent runtime calls `/v1/scan` before content reaches the model, `/v1/tool/authorize` before any tool runs, or `/v1/tool/run` to have SENTINEL run a tool end to end (authorize, sandbox, scan output, audit). It does not proxy model traffic.
 >
@@ -90,7 +92,11 @@ sentinel/
 │   ├── input_filter/              # L1
 │   │   ├── rules.py               # injection regexes + hidden-unicode detection
 │   │   ├── tagger.py              # wraps external content as <untrusted> data
-│   │   └── classifier.py          # pluggable ML backend (NeMo Guardrails, Llama Guard, ...)
+│   │   ├── classifier.py          # backend loader + ensemble (SENTINEL_CLASSIFIER)
+│   │   └── backends/
+│   │       ├── nim.py             # NVIDIA NemoGuard JailbreakDetect NIM client
+│   │       ├── prompt_guard.py    # Meta Llama Prompt Guard 2 (local, via transformers)
+│   │       └── chunking.py        # overlapping windows; oversize input raises, never truncates
 │   ├── policy/                    # L2
 │   │   ├── engine.py              # allowlist, JSON-schema args, host allowlist, rate limit, approval
 │   │   └── hosts.py               # extracts URL hosts from tool args (parsed, not regexed)
@@ -109,9 +115,10 @@ sentinel/
 │   └── egress.yaml                # hosts sandboxes may reach through the proxy
 ├── scripts/
 │   ├── approve.py                 # CLI: list / approve / deny pending actions
+│   ├── eval_classifier.py         # measure rules + classifier on the red-team corpus
 │   └── verify_log.py              # CLI: verify audit chain offline
 ├── tests/
-│   ├── unit/                      # test_core.py, test_l3_l4.py, test_l5.py
+│   ├── unit/                      # test_core.py, test_l3_l4.py, test_l5.py, test_classifier.py
 │   └── redteam/
 │       ├── cases/injection.yaml   # attacks, benign text, known gaps, known false positives
 │       ├── test_injection_corpus.py
@@ -227,9 +234,32 @@ curl -H "X-Sentinel-Admin-Token: $SENTINEL_ADMIN_TOKEN" http://127.0.0.1:8080/v1
 
 Prompts are logged as SHA-256 + length by default. Set `SENTINEL_LOG_CONTENT=1` to log raw text.
 
-### 8. Plug in an ML classifier (NVIDIA NeMo Guardrails, Llama Guard, LLM Guard)
+### 8. ML classifier backends (L1)
 
-Write a class with `score(text) -> float` and set `SENTINEL_CLASSIFIER=my_pkg.backend:MyClass`. Scores at or above `SENTINEL_CLASSIFIER_THRESHOLD` count as a high-severity finding. The built-in rules always run too.
+Rules catch the obvious attacks; they miss paraphrase, encodings, other languages and homoglyphs (see the red-team corpus). Add a model with `SENTINEL_CLASSIFIER`:
+
+| Backend | What it is | Runs | Needs |
+|---|---|---|---|
+| `nim` | NVIDIA NemoGuard JailbreakDetect, the jailbreak model behind NeMo Guardrails' jailbreak rail. Calls `POST /v1/classify`. | Separate service you host | NGC key and NVIDIA GPU; set `SENTINEL_NIM_URL` |
+| `prompt_guard` | Meta Llama Prompt Guard 2, a small binary injection/jailbreak classifier (86M multilingual, or 22M English-only) | In-process, text never leaves the host | `pip install -e ".[ml]"`, accept Meta's license on Hugging Face (gated), `HF_TOKEN` |
+| `module:Class` | Your own class with `score(text) -> float` | Anywhere | none |
+
+Note: **Llama Guard** (Meta's generative content-safety model) is a different tool for a different job (harmful content, not injection), so it is not wired in. Prompt Guard 2 is Meta's injection detector.
+
+```bash
+export SENTINEL_CLASSIFIER=prompt_guard          # or nim, or nim,prompt_guard (ensemble: highest score wins)
+export SENTINEL_CLASSIFIER_ON_ERROR=closed       # default
+curl localhost:8080/healthz                      # shows which classifier is active
+python scripts/eval_classifier.py                # measure it on the red-team corpus
+```
+
+Behaviour you should know:
+- **Fail closed by default.** If the classifier errors or times out, the input is **blocked** (`classifier_error`). Set `SENTINEL_CLASSIFIER_ON_ERROR=open` to fall back to rules only (`classifier_unavailable`); the choice is yours, availability versus protection. Either way a `classifier_degraded` alert fires, so silent degradation can't go unnoticed.
+- **A configured backend that can't load stops startup.** The gateway never quietly runs rules-only.
+- **Long documents are scored in full** in overlapping windows (Prompt Guard has a ~512-token window). Input that would need more than the chunk limit (default 32) is treated as an error, not truncated, because truncation is an evasion route. Raise `SENTINEL_NIM_MAX_CHUNKS` / `SENTINEL_PG_MAX_CHUNKS` if you handle large pages.
+- **Cost:** every item goes through the model, and ensembles run all members. Expect added latency per scan.
+- **Data:** with `nim`, document text goes to wherever `SENTINEL_NIM_URL` points. It defaults to localhost; do not point it at a hosted endpoint for sensitive content.
+- Scores at or above `SENTINEL_CLASSIFIER_THRESHOLD` (default 0.8) are a high-severity finding. For `nim` the score is 1.0 or 0.0 from its boolean verdict. The NIM's own score field is not interpreted.
 
 ### 9. Test
 
@@ -279,13 +309,14 @@ CI (`.github/workflows/ci.yml`) runs both.
 
 | Area | Approach |
 |---|---|
-| NVIDIA NeMo Guardrails / Jailbreak Detect NIM | Plug in via the classifier hook (L1) |
+| NVIDIA NemoGuard JailbreakDetect NIM | Built-in `nim` backend (L1). NeMo Guardrails itself (the framework) is not used |
+| Meta Llama Prompt Guard 2 | Built-in `prompt_guard` backend (L1) |
 | promptfoo | Wired in (HTTP provider against the live gateway); run for real, 8/8 |
 | garak | Not wired. It targets LLM endpoints, so it fits once SENTINEL proxies model traffic |
 | OPA | Planned alternative to YAML for L2 |
 | Regulated-industry expectations | Fail-closed defaults, separation of duties (agents cannot approve), single-use bound approvals, tamper-evident audit, content hashed in logs by default |
 
-Known limits: alerts **notify, they do not block** (a deny/approve decision is still L2's job). Per-tool `allowed_hosts` checks URLs inside args only, not bare hostnames. Detector learning periods are call-count based. The rule-based L1 misses paraphrase, encoded, foreign-language and homoglyph attacks (see the red-team corpus) and has known false positives; use the classifier hook for those. Tokens are stateless bearer tokens (no revocation before expiry, capped at 5 minutes) and services must trust the SENTINEL key. The egress proxy is HTTPS-only. Credential detection is pattern-based, so unknown formats can slip through. HMAC signing is symmetric and tail truncation of the log is not detectable from the file alone (anchor `head` off-box for stronger guarantees). Approvals are in-memory and lost on restart. Agent-facing endpoints have no auth, so bind to localhost or put them behind your own network controls.
+Known limits: the ML backends are unmeasured on real models (see the status note), and a classifier is itself attackable, so keep L2 to L4 in place. Alerts **notify, they do not block** (a deny/approve decision is still L2's job). Per-tool `allowed_hosts` checks URLs inside args only, not bare hostnames. Detector learning periods are call-count based. The rule-based L1 misses paraphrase, encoded, foreign-language and homoglyph attacks (see the red-team corpus) and has known false positives; use the classifier hook for those. Tokens are stateless bearer tokens (no revocation before expiry, capped at 5 minutes) and services must trust the SENTINEL key. The egress proxy is HTTPS-only. Credential detection is pattern-based, so unknown formats can slip through. HMAC signing is symmetric and tail truncation of the log is not detectable from the file alone (anchor `head` off-box for stronger guarantees). Approvals are in-memory and lost on restart. Agent-facing endpoints have no auth, so bind to localhost or put them behind your own network controls.
 
 ---
 
@@ -295,7 +326,8 @@ Known limits: alerts **notify, they do not block** (a deny/approve decision is s
 |---|---|
 | Done | L1 input filter, L2 policy engine, L3 sandbox, L4 secrets and output scanning, L5 audit log |
 | Done | L5 anomaly detection and alerts; red-team corpus + promptfoo + CI workflow |
-| Next | Ship a real classifier backend (NeMo Guardrails / Llama Guard) to close the corpus gaps; OPA policy option; proxy model traffic (then garak); token revocation |
+| Done | Classifier backends: NVIDIA JailbreakDetect NIM, Prompt Guard 2, ensemble, fail-closed error policy |
+| Next | Measure the backends on your hardware and tune the threshold; OPA policy option; proxy model traffic (then garak); token revocation |
 
 ## Design principles
 

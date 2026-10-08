@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 
 from sentinel.audit.log import AuditLog
@@ -17,9 +18,12 @@ _BLOCK_AT = {"user": 3, "external": 2}  # external content gets a lower toleranc
 
 
 class Pipeline:
-    def __init__(self, engine: PolicyEngine, log: AuditLog, sandbox: Sandbox, broker: TokenBroker):
+    def __init__(self, engine: PolicyEngine, log: AuditLog, sandbox: Sandbox, broker: TokenBroker, classifier=None):
         self.engine, self.log, self.sandbox, self.broker = engine, log, sandbox, broker
-        self.classifier = clf.load()
+        self.classifier = classifier if classifier is not None else clf.load()
+        self.on_error = os.getenv("SENTINEL_CLASSIFIER_ON_ERROR", "closed")
+        if self.on_error not in ("closed", "open"):
+            raise ValueError("SENTINEL_CLASSIFIER_ON_ERROR must be 'closed' or 'open'")
         self.threshold = float(os.getenv("SENTINEL_CLASSIFIER_THRESHOLD", "0.8"))
         self.log_content = os.getenv("SENTINEL_LOG_CONTENT") == "1"
 
@@ -28,8 +32,14 @@ class Pipeline:
         blocked = False
         for i, item in enumerate(req.items):
             hits = scan_text(item.text)
-            if self.classifier and self.classifier.score(item.text) >= self.threshold:
-                hits.append(("classifier", 3))
+            if self.classifier:
+                try:
+                    if self.classifier.score(item.text) >= self.threshold:
+                        hits.append(("classifier", 3))
+                except Exception:  # details go to the server log only, never to the caller
+                    logging.getLogger("sentinel.classifier").exception("classifier failed")
+                    # closed (default): treat as high severity -> block. open: record it and continue on rules alone.
+                    hits.append(("classifier_error", 3) if self.on_error == "closed" else ("classifier_unavailable", 1))
             findings += [Finding(rule=r, severity=s, item=i) for r, s in hits]
             blocked |= any(s >= _BLOCK_AT[item.source] for _, s in hits)
         resp = ScanResponse(
