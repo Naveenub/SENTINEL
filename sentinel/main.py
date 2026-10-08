@@ -10,6 +10,7 @@ from sentinel.auth import AgentAuth, FailureLimiter
 from sentinel.audit.alerts import log_sink, webhook_sink
 from sentinel.audit.detect import Detector
 from sentinel.audit.log import AuditLog
+from sentinel.netwarn import warn_if_exposed
 from sentinel.models import RunResponse, ScanRequest, ScanResponse, ToolDecision, ToolRequest
 from sentinel.pipeline import Pipeline
 from sentinel.policy.engine import PolicyEngine
@@ -66,6 +67,7 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
     broker = TokenBroker(key, RevocationStore(os.getenv("SENTINEL_REVOKE_DB", os.getenv("SENTINEL_AUDIT_DB", "sentinel_audit.db"))))
     verifier_token = os.getenv("SENTINEL_VERIFIER_TOKEN", "").encode()
     auth = AgentAuth.from_env(engine.agent_names, [admin_token, verifier_token])  # None = auth off
+    warn_if_exposed(auth is not None)
     pipe = Pipeline(engine, log, sandbox or Sandbox(), broker, classifier)
     proxy = proxy_from_env(pipe, model_client)
 

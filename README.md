@@ -12,6 +12,9 @@
 
 A defense gateway that sits between **untrusted input**, the **model**, and **tools**. Every prompt, tool call, and output passes through five layers before anything touches the outside world.
 
+> [!WARNING]
+> **Do not expose SENTINEL beyond localhost without agent auth *and* TLS.** With auth off (the default) every agent-facing endpoint trusts any caller that can reach the port. With auth on, tokens are bearer secrets sent in cleartext unless you terminate TLS. On startup SENTINEL logs a boxed warning if it detects a non-loopback bind (`--host 0.0.0.0` etc.); see section 15.
+
 > **Status:** all five layers are built and tested: 170 tests (171 with the `opa` binary on PATH) plus a red-team corpus (11 documented detection gaps tracked as strict expected-failures). promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
 >
 > **ML classifier backends (NVIDIA JailbreakDetect NIM, Meta Prompt Guard 2) are implemented but not measured against real models.** I could not download models or reach an NIM from the build environment. The NIM client is tested against a local server implementing NVIDIA's documented API, and Prompt Guard against a stand-in pipeline. Run `scripts/eval_classifier.py` on your machine to get real numbers before relying on either.
@@ -171,6 +174,9 @@ agents:
 set -a; source .env; set +a
 uvicorn --factory sentinel.main:create_app --host 127.0.0.1 --port 8080
 ```
+
+> [!WARNING]
+> Keep `--host 127.0.0.1`. Binding to `0.0.0.0` or any non-loopback address makes the gateway reachable from the network and triggers a startup warning (best effort: read from `SENTINEL_BIND_HOST`, `--host`, then `UVICORN_HOST`; under gunicorn or other launchers set `SENTINEL_BIND_HOST` yourself). Silence it with `SENTINEL_ACK_NONLOOPBACK=1` only after auth and TLS are in place.
 
 ### 4. Call it from your agent runtime
 
@@ -378,6 +384,9 @@ garak scores model behaviour, so a result is "model + SENTINEL", not SENTINEL al
 
 ### 15. Agent authentication (optional)
 
+> [!WARNING]
+> **Auth off + non-loopback bind = open gateway.** Auth on + non-loopback bind without TLS = tokens readable on the wire. Either combination logs a startup warning.
+
 By default the agent-facing endpoints trust whoever can reach them, so you bind to localhost. To close that gap, give each agent its own token:
 
 ```bash
@@ -399,7 +408,7 @@ Anthropic(base_url="http://127.0.0.1:8080/proxy/research-bot", api_key=AGENT_TOK
 - **Audit.** Failures are logged as `auth` events (agent claimed, reason, client address, path; never the token), at most one per agent, reason and client every 10 seconds so an unauthenticated caller cannot flood the log. No alert rule watches them yet.
 - **Expiry.** In the token file a token can be `{"token": "...", "expires": "<ISO 8601>"}` (no timezone = UTC). Past that time it is rejected as invalid and audited as `expired agent token`, so a rotation's old token can be given an end date. Tokens from `SENTINEL_AGENT_TOKENS` never expire.
 - **Lockout.** After `SENTINEL_AUTH_MAX_FAILURES` (default 10) invalid tokens from one client address within `SENTINEL_AUTH_FAILURE_WINDOW` seconds (60), that client gets `429` with `Retry-After` for `SENTINEL_AUTH_LOCKOUT_SECONDS` (300), even with a valid token. Missing tokens and a valid token used for the wrong agent (403) do not count. It is keyed by client address, not agent, so guessing an agent's name cannot lock that agent out. Behind a reverse proxy all callers share the proxy's address, so rate-limit per client at the proxy too. State is in memory and resets on restart.
-- **Not provided:** TLS. Tokens are bearer secrets, so use localhost, a TLS-terminating proxy or a private network (`uvicorn` can also terminate TLS itself with `--ssl-keyfile` and `--ssl-certfile`).
+- **Not provided: TLS.** Startup warns when auth is on and the bind is non-loopback. Tokens are bearer secrets, so use localhost, a TLS-terminating proxy or a private network (`uvicorn` can also terminate TLS itself with `--ssl-keyfile` and `--ssl-certfile`).
 
 ---
 
