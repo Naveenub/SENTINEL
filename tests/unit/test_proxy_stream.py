@@ -109,8 +109,9 @@ def test_openai_stream_tool_call_reassembles(make):
     c = make(Upstream("openai", "ok", tool=("web_fetch", {"url": "https://a.test"})))
     ev = [d for _, d in events(oai(c))][:-1]
     tcs = [t for e in ev for ch in e["choices"] for t in ch["delta"].get("tool_calls", [])]
-    assert tcs[0]["id"] == "c1" and tcs[0]["function"]["name"] == "web_fetch"
-    assert json.loads(tcs[0]["function"]["arguments"]) == {"url": "https://a.test"}
+    assert tcs[0]["id"] == "c1" and tcs[0]["function"]["name"] == "web_fetch"   # id/name only in the first fragment
+    assert all("id" not in t for t in tcs[1:])
+    assert json.loads("".join(t["function"]["arguments"] for t in tcs)) == {"url": "https://a.test"}
     assert [e["choices"][0]["finish_reason"] for e in ev if e["choices"][0]["finish_reason"]] == ["tool_calls"]
 
 
@@ -218,3 +219,22 @@ def test_openai_sdk_consumes_buffered_stream(make):
     chunks = list(cl.chat.completions.create(model="m", stream=True, messages=[{"role": "user", "content": "hi"}]))
     assert "".join(ch.choices[0].delta.content or "" for ch in chunks if ch.choices) == "hello world"
     assert chunks[-1].choices[0].finish_reason == "stop"
+
+
+def test_long_text_and_tool_args_are_chunked_and_reassemble(make):
+    text = "word " * 40                                               # 200 chars -> several 32-char deltas
+    c = make(Upstream("openai", text, tool=("web_fetch", {"url": "https://a.test/" + "p" * 60})))
+    ev = [d for _, d in events(oai(c))][:-1]
+    pieces = [e["choices"][0]["delta"]["content"] for e in ev if e["choices"] and e["choices"][0]["delta"].get("content")]
+    assert len(pieces) > 1 and all(len(p) <= 32 for p in pieces) and "".join(pieces) == text
+    args = "".join(t["function"]["arguments"] for e in ev for ch in e["choices"]
+                   for t in ch["delta"].get("tool_calls", []))
+    assert json.loads(args)["url"].endswith("p" * 60)
+
+    c = make(Upstream("anthropic", text, tool=("web_fetch", {"url": "https://a.test/" + "p" * 60})))
+    ev = events(ant(c))
+    deltas = [d["delta"] for n, d in ev if n == "content_block_delta"]
+    txt = [x["text"] for x in deltas if x["type"] == "text_delta"]
+    assert len(txt) > 1 and all(len(p) <= 32 for p in txt) and "".join(txt) == text
+    js = "".join(x["partial_json"] for x in deltas if x["type"] == "input_json_delta")
+    assert json.loads(js)["url"].endswith("p" * 60)

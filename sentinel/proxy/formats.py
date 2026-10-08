@@ -25,6 +25,13 @@ def _text_parts(content, put_str):
                 yield (lambda v, p=part: p.__setitem__("text", v)), part["text"]
 
 
+CHUNK = 32  # characters per emitted delta, so client UIs see token-like streaming (cosmetic; reply is already scanned)
+
+
+def _slices(text: str, n: int = CHUNK):
+    return [text[i:i + n] for i in range(0, len(text), n)] or [""]
+
+
 def _sse(data: dict, event: str | None = None) -> bytes:
     head = f"event: {event}\n" if event else ""
     return f"{head}data: {json.dumps(data, separators=(',', ':'))}\n\n".encode()
@@ -95,17 +102,20 @@ class OpenAIFormat:
                 first["content"] = ""
             yield chunk([{"index": idx, "delta": first, "finish_reason": None}])
             content = msg.get("content")
+            if isinstance(content, list):  # content parts: flatten text for the delta stream
+                content = "".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
             if isinstance(content, str) and content:
-                yield chunk([{"index": idx, "delta": {"content": content}, "finish_reason": None}])
-            elif isinstance(content, list):  # content parts: flatten text for the delta stream
-                text = "".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
-                if text:
-                    yield chunk([{"index": idx, "delta": {"content": text}, "finish_reason": None}])
+                for piece in _slices(content):
+                    yield chunk([{"index": idx, "delta": {"content": piece}, "finish_reason": None}])
             for j, tc in enumerate(msg.get("tool_calls") or []):
                 fn = (tc or {}).get("function") or {}
+                args = fn.get("arguments") or ""
                 yield chunk([{"index": idx, "finish_reason": None, "delta": {"tool_calls": [{
                     "index": j, "id": (tc or {}).get("id"), "type": (tc or {}).get("type") or "function",
-                    "function": {"name": fn.get("name") or "", "arguments": fn.get("arguments") or ""}}]}}])
+                    "function": {"name": fn.get("name") or "", "arguments": ""}}]}}])
+                for piece in _slices(args) if args else []:
+                    yield chunk([{"index": idx, "finish_reason": None, "delta": {"tool_calls": [{
+                        "index": j, "function": {"arguments": piece}}]}}])
             if isinstance(msg.get("function_call"), dict):
                 yield chunk([{"index": idx, "delta": {"function_call": msg["function_call"]}, "finish_reason": None}])
             yield chunk([{"index": idx, "delta": {}, "finish_reason": c.get("finish_reason") or "stop"}])
@@ -188,20 +198,21 @@ class AnthropicFormat:
             if t == "text":
                 yield _sse({"type": "content_block_start", "index": i,
                             "content_block": {"type": "text", "text": ""}}, "content_block_start")
-                if b.get("text"):
-                    yield delta({"type": "text_delta", "text": b["text"]})
+                for piece in _slices(b["text"]) if b.get("text") else []:
+                    yield delta({"type": "text_delta", "text": piece})
                 for cit in b.get("citations") or []:
                     yield delta({"type": "citations_delta", "citation": cit})
             elif t in ("tool_use", "server_tool_use"):
                 yield _sse({"type": "content_block_start", "index": i,
                             "content_block": {**{k: v for k, v in b.items() if k != "input"}, "input": {}}},
                            "content_block_start")
-                yield delta({"type": "input_json_delta", "partial_json": json.dumps(b.get("input", {}))})
+                for piece in _slices(json.dumps(b.get("input", {}))):
+                    yield delta({"type": "input_json_delta", "partial_json": piece})
             elif t == "thinking":
                 yield _sse({"type": "content_block_start", "index": i,
                             "content_block": {"type": "thinking", "thinking": ""}}, "content_block_start")
-                if b.get("thinking"):
-                    yield delta({"type": "thinking_delta", "thinking": b["thinking"]})
+                for piece in _slices(b["thinking"]) if b.get("thinking") else []:
+                    yield delta({"type": "thinking_delta", "thinking": piece})
                 if b.get("signature"):
                     yield delta({"type": "signature_delta", "signature": b["signature"]})
             else:  # redacted_thinking, *_tool_result and anything newer arrive whole in content_block_start

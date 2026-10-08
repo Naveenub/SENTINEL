@@ -161,7 +161,7 @@ def from_env(pipe: Pipeline, client: httpx.Client | None = None) -> ModelProxy |
     if not url:
         return None
     return ModelProxy(pipe, url, os.getenv("SENTINEL_UPSTREAM_KEY", ""), client,
-                      float(os.getenv("SENTINEL_UPSTREAM_TIMEOUT", "120")),
+                      float(os.getenv("SENTINEL_UPSTREAM_TIMEOUT", "300")),
                       os.getenv("SENTINEL_PROXY_BLOCK_MODE", "error"),
                       os.getenv("SENTINEL_PROXY_TOOLCALLS", "enforce"),
                       os.getenv("SENTINEL_PROXY_STREAM", "buffered"))
