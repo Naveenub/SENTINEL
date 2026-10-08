@@ -20,6 +20,14 @@ def rules(alerts):
 
 
 # ---- detector logic
+def test_auth_failure_spike_is_per_client_and_cooled_down():
+    d = Detector(auth_limit=3)
+    got = [x for i in range(6) for x in d.observe_auth("1.2.3.4", f"bot{i}", now=i)]
+    assert rules(got) == ["auth_failure_spike"] and "1.2.3.4" in got[0]["detail"]   # rotating agent names do not evade it
+    assert d.observe_auth("5.6.7.8", "x", now=7) == []                              # another client has its own count
+    assert d.observe({"type": "auth", "decision": "deny", "agent": "x"}) == []      # log entries never double-count
+
+
 def test_deny_spike_alerts_once_per_cooldown():
     d = Detector(deny_limit=3)
     got = [x for i in range(6) for x in d.observe(tool(decision="deny"), now=i)]

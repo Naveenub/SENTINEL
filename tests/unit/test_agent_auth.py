@@ -253,3 +253,14 @@ def test_bad_expiry_refuses_to_start(make, tmp_path, monkeypatch):
     f.write_text(json.dumps({"research-bot": [{"token": RB}]}))
     with pytest.raises(ValueError, match="expires"):
         make(SENTINEL_AGENT_TOKENS_FILE=str(f))
+
+
+def test_failure_flood_alerts_even_though_the_audit_log_is_throttled(make):
+    c = make(SENTINEL_AUTH_ALERT_LIMIT="5", SENTINEL_AUTH_MAX_FAILURES="1000")
+    for _ in range(5):
+        c.post("/v1/scan", json=SCAN, headers=bearer("guess-0123456789abcdef"))
+    assert len(c.app.state.log.recent("auth", 20)) == 1                    # throttled to one entry
+    al = c.app.state.log.recent("alert", 20)
+    assert [a["rule"] for a in al] == ["auth_failure_spike"] and al[0]["severity"] == "high"
+    assert "guess-0123456789abcdef" not in json.dumps(al)
+    assert c.get("/v1/audit/verify", headers=ADMIN).json()["ok"] is True

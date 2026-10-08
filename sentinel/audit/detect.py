@@ -1,6 +1,7 @@
 """L5 anomaly detection over audit events. Pure logic: feed events in, get alerts out.
 
-Rules: policy_backend_degraded (OPA down/invalid), deny_spike, call_spike, tool_after_blocked_input, output_withheld, and (after a learning
+Rules: policy_backend_degraded (OPA down/invalid), auth_failure_spike (per client, fed directly by observe_auth so the
+audit-log throttle does not hide floods), deny_spike, call_spike, tool_after_blocked_input, output_withheld, and (after a learning
 period of allowed calls per agent) new_domain and unusual_sequence. Denied calls never teach the
 baseline, so an attacker cannot normalise a new domain by failing against it first.
 # ponytail: baselines are rebuilt from the audit log at startup (see main.py), but the learning
@@ -12,10 +13,11 @@ from collections import defaultdict, deque
 
 class Detector:
     def __init__(self, learn=50, call_limit=60, deny_limit=10, window=60.0, block_window=60.0,
-                 cooldown=60.0, clock=time.time):
-        self.learn, self.call_limit, self.deny_limit = learn, call_limit, deny_limit
+                 cooldown=60.0, clock=time.time, auth_limit=10):
+        self.learn, self.call_limit, self.deny_limit, self.auth_limit = learn, call_limit, deny_limit, auth_limit
         self.window, self.block_window, self.cooldown, self.clock = window, block_window, cooldown, clock
         self._calls, self._denies = defaultdict(deque), defaultdict(deque)
+        self._auth_fails: dict[str, deque] = defaultdict(deque)
         self._hosts, self._pairs = defaultdict(set), defaultdict(set)
         self._n: dict[str, int] = defaultdict(int)
         self._last_tool: dict[str, str] = {}
@@ -27,6 +29,20 @@ class Detector:
         while q and now - q[0] > self.window:
             q.popleft()
         return len(q)
+
+    def observe_auth(self, client: str, agent: str = "", now: float | None = None) -> list[dict]:
+        """Count one failed authentication, keyed by client address (an attacker rotates claimed agent names).
+        Called for every failure, before any log throttling. Never replayed from the log."""
+        now = self.clock() if now is None else now
+        if len(self._auth_fails) > 4096:
+            self._auth_fails = defaultdict(deque, {k: q for k, q in self._auth_fails.items() if q and now - q[-1] <= self.window})
+        n = self._bump(self._auth_fails[client], now)
+        k = ("auth_failure_spike", client, "")
+        if n >= self.auth_limit and now - self._last_alert.get(k, -1e18) >= self.cooldown:
+            self._last_alert[k] = now
+            return [{"rule": "auth_failure_spike", "severity": "high", "agent": agent or "?",
+                     "detail": f"{n} failed authentications from {client} in {int(self.window)}s"}]
+        return []
 
     def observe(self, ev: dict, now: float | None = None, emit: bool = True) -> list[dict]:
         kind = ev.get("type")

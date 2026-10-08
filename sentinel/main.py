@@ -52,16 +52,20 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
     engine = PolicyEngine(os.getenv("SENTINEL_POLICY", "policies/agents.yaml"), opa, approvals)
     detector = Detector(learn=int(os.getenv("SENTINEL_LEARN_CALLS", "50")),
                         call_limit=int(os.getenv("SENTINEL_CALL_LIMIT", "60")),
-                        deny_limit=int(os.getenv("SENTINEL_DENY_LIMIT", "10")))
+                        deny_limit=int(os.getenv("SENTINEL_DENY_LIMIT", "10")),
+                        auth_limit=int(os.getenv("SENTINEL_AUTH_ALERT_LIMIT", "10")))
     for ts, ev in log.events():  # rebuild baselines from history so a restart is not an amnesty
         detector.observe(ev, now=ts, emit=False)
     sinks = [log_sink] + ([webhook_sink(os.environ["SENTINEL_ALERT_WEBHOOK"])] if os.getenv("SENTINEL_ALERT_WEBHOOK") else [])
 
-    def on_event(ev: dict):
-        for a in detector.observe(ev):
+    def emit(alerts: list[dict]) -> None:
+        for a in alerts:
             log.append({"type": "alert", **a})  # alerts are themselves tamper-evident
             for s in sinks:
                 s(a)
+
+    def on_event(ev: dict):
+        emit(detector.observe(ev))
 
     log.subscribe(on_event)
     broker = TokenBroker(key, RevocationStore(os.getenv("SENTINEL_REVOKE_DB", os.getenv("SENTINEL_AUDIT_DB", "sentinel_audit.db"))))
@@ -115,8 +119,10 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
 
     def _auth_audit(request: Request, claimed: str, reason: str) -> None:
         """One audit entry per (agent, reason, client) per 10s, so an unauthenticated caller cannot flood the log.
+        Every failure still reaches the detector first, so the throttle never hides a flood from alerting.
         The token itself is never recorded."""
         client = request.client.host if request.client else "?"
+        emit(detector.observe_auth(client, claimed[:64]))
         k, now = (claimed[:64], reason, client), time.monotonic()
         if now - _auth_seen.get(k, -1e18) < 10:
             return
