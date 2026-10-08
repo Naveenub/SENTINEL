@@ -12,7 +12,7 @@
 
 A defense gateway that sits between **untrusted input**, the **model**, and **tools**. Every prompt, tool call, and output passes through five layers before anything touches the outside world.
 
-> **Status:** all five layers are built and tested: 146 tests (147 with the `opa` binary on PATH) plus a red-team corpus (11 documented detection gaps tracked as strict expected-failures). promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
+> **Status:** all five layers are built and tested: 154 tests (155 with the `opa` binary on PATH) plus a red-team corpus (11 documented detection gaps tracked as strict expected-failures). promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
 >
 > **ML classifier backends (NVIDIA JailbreakDetect NIM, Meta Prompt Guard 2) are implemented but not measured against real models.** I could not download models or reach an NIM from the build environment. The NIM client is tested against a local server implementing NVIDIA's documented API, and Prompt Guard against a stand-in pipeline. Run `scripts/eval_classifier.py` on your machine to get real numbers before relying on either.
 >
@@ -101,6 +101,7 @@ sentinel/
 │   │       └── chunking.py        # overlapping windows; oversize input raises, never truncates
 │   ├── policy/                    # L2
 │   │   ├── engine.py              # allowlist, JSON-schema args, host allowlist, rate limit, approval, preflight
+│   │   ├── approvals.py           # SQLite-backed human-approval records (TTL, pending cap)
 │   │   ├── opa.py                 # OPA REST client (fail closed); optional backend
 │   │   └── hosts.py               # extracts URL hosts from tool args (parsed, not regexed)
 │   ├── sandbox/                   # L3
@@ -227,6 +228,8 @@ docker run --rm --network none --read-only --cap-drop ALL --user 65534:65534 pyt
 ### 6. Approve destructive actions
 
 A `pending` decision returns an `approval_id`. A human approves it, then the agent re-submits the **same** call with that id. Approvals are single-use and bound to the exact arguments.
+
+Approvals are **persisted in SQLite** (`SENTINEL_APPROVAL_DB`, default the audit DB), so pending requests and grants survive a restart. A pending request expires `SENTINEL_APPROVAL_TTL` seconds (default 86400) after it was created, and a decided one that long after the decision; an expired id is simply denied when the agent re-submits. At most `SENTINEL_APPROVAL_MAX_PENDING` (default 1000) requests can be pending; beyond that new ones are denied (`too many pending approvals`). The tool arguments are stored in plaintext **only while the request is pending** (the approver has to see them) and are cleared when it is approved or denied, so protect the DB file like the audit DB. Rate-limit counters are still in memory and reset on restart.
 
 ```bash
 export SENTINEL_ADMIN_TOKEN=...
@@ -385,7 +388,7 @@ garak scores model behaviour, so a result is "model + SENTINEL", not SENTINEL al
 | OPA | Optional L2 decision backend (section 12), tested against a real OPA server |
 | Regulated-industry expectations | Fail-closed defaults, separation of duties (agents cannot approve), single-use bound approvals, tamper-evident audit, content hashed in logs by default |
 
-Known limits: the ML backends are unmeasured on real models (see the status note), and a classifier is itself attackable, so keep L2 to L4 in place. Alerts **notify, they do not block** (a deny/approve decision is still L2's job). Per-tool `allowed_hosts` checks URLs inside args only, not bare hostnames. Detector learning periods are call-count based. The rule-based L1 misses paraphrase, encoded, foreign-language and homoglyph attacks (see the red-team corpus) and has known false positives; use the classifier hook for those. Tokens are signed bearer tokens capped at 5 minutes; revocation is enforced only for verifiers that call `/v1/token/verify` (offline verification with the shared key cannot see it) and services must trust the SENTINEL key. The model proxy streams only in buffered mode (no latency benefit) and does not scan non-text content. The egress proxy is HTTPS-only. Credential detection is pattern-based, so unknown formats can slip through. HMAC signing is symmetric and tail truncation of the log is not detectable from the file alone (anchor `head` off-box for stronger guarantees). Approvals are in-memory and lost on restart. Agent-facing endpoints have no auth, so bind to localhost or put them behind your own network controls.
+Known limits: the ML backends are unmeasured on real models (see the status note), and a classifier is itself attackable, so keep L2 to L4 in place. Alerts **notify, they do not block** (a deny/approve decision is still L2's job). Per-tool `allowed_hosts` checks URLs inside args only, not bare hostnames. Detector learning periods are call-count based. The rule-based L1 misses paraphrase, encoded, foreign-language and homoglyph attacks (see the red-team corpus) and has known false positives; use the classifier hook for those. Tokens are signed bearer tokens capped at 5 minutes; revocation is enforced only for verifiers that call `/v1/token/verify` (offline verification with the shared key cannot see it) and services must trust the SENTINEL key. The model proxy streams only in buffered mode (no latency benefit) and does not scan non-text content. The egress proxy is HTTPS-only. Credential detection is pattern-based, so unknown formats can slip through. HMAC signing is symmetric and tail truncation of the log is not detectable from the file alone (anchor `head` off-box for stronger guarantees). Agent-facing endpoints have no auth, so bind to localhost or put them behind your own network controls.
 
 ---
 

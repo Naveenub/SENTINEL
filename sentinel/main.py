@@ -16,6 +16,7 @@ from sentinel.proxy.formats import FORMATS
 from sentinel.proxy.model import from_env as proxy_from_env
 from sentinel.sandbox.runner import Sandbox
 from sentinel.secrets.broker import TokenBroker
+from sentinel.policy.approvals import ApprovalStore
 from sentinel.secrets.revocation import RevocationStore
 
 
@@ -42,7 +43,10 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
     admin_token = os.environ["SENTINEL_ADMIN_TOKEN"].encode()
     log = AuditLog(os.getenv("SENTINEL_AUDIT_DB", "sentinel_audit.db"), key)
     opa = opa if opa is not None else _opa_from_env()
-    engine = PolicyEngine(os.getenv("SENTINEL_POLICY", "policies/agents.yaml"), opa)
+    approvals = ApprovalStore(os.getenv("SENTINEL_APPROVAL_DB", os.getenv("SENTINEL_AUDIT_DB", "sentinel_audit.db")),
+                              float(os.getenv("SENTINEL_APPROVAL_TTL", "86400")),
+                              int(os.getenv("SENTINEL_APPROVAL_MAX_PENDING", "1000")))
+    engine = PolicyEngine(os.getenv("SENTINEL_POLICY", "policies/agents.yaml"), opa, approvals)
     detector = Detector(learn=int(os.getenv("SENTINEL_LEARN_CALLS", "50")),
                         call_limit=int(os.getenv("SENTINEL_CALL_LIMIT", "60")),
                         deny_limit=int(os.getenv("SENTINEL_DENY_LIMIT", "10")))

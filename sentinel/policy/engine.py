@@ -9,6 +9,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from sentinel.models import ToolDecision
+from sentinel.policy.approvals import ApprovalStore
 from sentinel.policy.hosts import extract_hosts
 from sentinel.sandbox.egress import EgressAllowlist
 
@@ -27,7 +28,7 @@ def _fp(agent: str, tool: str, args: dict) -> str:
 class PolicyEngine:
     """Deny-by-default. Order: allowlist -> arg schema -> rate limit -> human approval."""
 
-    def __init__(self, path: str, opa=None):
+    def __init__(self, path: str, opa=None, approvals: ApprovalStore | None = None):
         with open(path) as f:
             cfg = yaml.safe_load(f) or {}
         self._opa = opa  # None = YAML decides; else OPA must also allow (see policy/opa.py)
@@ -55,7 +56,7 @@ class PolicyEngine:
                     "approval": spec.get("approval") == "required",
                 }
         self._hits: dict[tuple[str, str], deque] = defaultdict(deque)
-        self._approvals: dict[str, dict] = {}
+        self._approvals = approvals or ApprovalStore()  # in-memory unless the caller passes a persistent store
         self._lock = threading.Lock()
 
     def has_agent(self, agent: str) -> bool:
@@ -105,17 +106,19 @@ class PolicyEngine:
                 return ToolDecision(decision="allow", reason="policy ok")
             fp = _fp(agent, tool, args)
             if approval_id is None:
-                # ponytail: unbounded pending map – cap + expire when exposed beyond one trusted host
                 aid = secrets.token_urlsafe(12)
-                self._approvals[aid] = {"fp": fp, "agent": agent, "tool": tool, "args": args, "state": "pending"}
+                if not self._approvals.create(aid, fp, agent, tool, args):
+                    return ToolDecision(decision="deny", reason="too many pending approvals")
                 return ToolDecision(decision="pending", reason="human approval required", approval_id=aid)
             rec = self._approvals.get(approval_id)
             if rec is None or rec["fp"] != fp:
                 return ToolDecision(decision="deny", reason="approval does not match this call")
             if rec["state"] == "pending":
                 return ToolDecision(decision="pending", reason="awaiting approval", approval_id=approval_id)
-            del self._approvals[approval_id]  # single use
-            if rec["state"] == "approved":
+            state = self._approvals.consume(approval_id)  # single use
+            if state is None:
+                return ToolDecision(decision="deny", reason="approval does not match this call")
+            if state == "approved":
                 return ToolDecision(decision="allow", reason="human approved")
             return ToolDecision(decision="deny", reason="human denied")
 
@@ -127,17 +130,7 @@ class PolicyEngine:
         return {"sandbox": spec["sandbox"], "secrets": spec["secrets"], "token_ttl": spec["token_ttl"]}
 
     def resolve(self, approval_id: str, approve: bool) -> bool:
-        with self._lock:
-            rec = self._approvals.get(approval_id)
-            if not rec or rec["state"] != "pending":
-                return False
-            rec["state"] = "approved" if approve else "denied"
-            return True
+        return self._approvals.resolve(approval_id, approve)
 
     def pending(self) -> list[dict]:
-        with self._lock:
-            return [
-                {"approval_id": k, "agent": v["agent"], "tool": v["tool"], "args": v["args"]}
-                for k, v in self._approvals.items()
-                if v["state"] == "pending"
-            ]
+        return self._approvals.pending()
