@@ -195,3 +195,61 @@ def test_token_equal_to_admin_or_verifier_token_is_refused(make):
         make(SENTINEL_ADMIN_TOKEN="a" * 20, SENTINEL_AGENT_TOKENS=f"research-bot={'a' * 20}")
     with pytest.raises(ValueError, match="admin and verifier"):
         make(SENTINEL_VERIFIER_TOKEN="v" * 20, SENTINEL_AGENT_TOKENS=f"research-bot={'v' * 20}")
+
+
+# ---------------------------------------------------------------- lockout and expiry
+
+def test_lockout_after_repeated_invalid_tokens_then_recovers(make):
+    c = make(SENTINEL_AUTH_MAX_FAILURES="3", SENTINEL_AUTH_LOCKOUT_SECONDS="60")
+    now = [1000.0]
+    c.app.state.limiter.clock = lambda: now[0]
+    for _ in range(3):
+        assert c.post("/v1/scan", json=SCAN, headers=bearer("guess-0123456789abcdef")).status_code == 401
+    r = c.post("/v1/scan", json=SCAN, headers=bearer(RB))                  # even a valid token is refused while locked out
+    assert r.status_code == 429 and 1 <= int(r.headers["retry-after"]) <= 61
+    assert c.get("/healthz", headers=ADMIN).status_code == 429
+    assert c.post("/proxy/research-bot/v1/messages", json={}, headers={"x-api-key": RB}).json()["error"]["code"] == "too_many_attempts"
+    now[0] += 61
+    assert c.post("/v1/scan", json=SCAN, headers=bearer(RB)).status_code == 200
+
+
+def test_missing_token_and_wrong_agent_do_not_trigger_lockout(make):
+    c = make(SENTINEL_AUTH_MAX_FAILURES="2")
+    for _ in range(5):
+        assert c.post("/v1/scan", json=SCAN).status_code == 401
+        assert c.post("/v1/scan", json=SCAN, headers=bearer(GT)).status_code == 403
+    assert c.post("/v1/scan", json=SCAN, headers=bearer(RB)).status_code == 200
+
+
+def test_failures_outside_the_window_are_forgotten(make):
+    c = make(SENTINEL_AUTH_MAX_FAILURES="3", SENTINEL_AUTH_FAILURE_WINDOW="10")
+    now = [0.0]
+    c.app.state.limiter.clock = lambda: now[0]
+    for _ in range(2):
+        c.post("/v1/scan", json=SCAN, headers=bearer("guess-0123456789abcdef"))
+    now[0] += 11
+    c.post("/v1/scan", json=SCAN, headers=bearer("guess-0123456789abcdef"))
+    assert c.post("/v1/scan", json=SCAN, headers=bearer(RB)).status_code == 200
+
+
+def test_token_expiry(make, tmp_path, monkeypatch):
+    monkeypatch.delenv("SENTINEL_AGENT_TOKENS")
+    f = tmp_path / "t.json"
+    f.write_text(json.dumps({"research-bot": [{"token": RB, "expires": "2999-01-01T00:00:00Z"},
+                                              {"token": "rb-old-token-0123456789", "expires": "2000-01-01T00:00:00"}],
+                             "garak-target": GT}))
+    c = make(SENTINEL_AGENT_TOKENS_FILE=str(f))
+    assert c.post("/v1/scan", json=SCAN, headers=bearer(RB)).status_code == 200
+    assert c.post("/v1/scan", json=SCAN, headers=bearer("rb-old-token-0123456789")).status_code == 401
+    assert c.app.state.log.recent("auth", 5)[0]["reason"] == "expired agent token"
+
+
+def test_bad_expiry_refuses_to_start(make, tmp_path, monkeypatch):
+    monkeypatch.delenv("SENTINEL_AGENT_TOKENS")
+    f = tmp_path / "t.json"
+    f.write_text(json.dumps({"research-bot": [{"token": RB, "expires": "tomorrow"}]}))
+    with pytest.raises(ValueError, match="ISO 8601"):
+        make(SENTINEL_AGENT_TOKENS_FILE=str(f))
+    f.write_text(json.dumps({"research-bot": [{"token": RB}]}))
+    with pytest.raises(ValueError, match="expires"):
+        make(SENTINEL_AGENT_TOKENS_FILE=str(f))

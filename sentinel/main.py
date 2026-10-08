@@ -6,7 +6,7 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from sentinel.auth import AgentAuth
+from sentinel.auth import AgentAuth, FailureLimiter
 from sentinel.audit.alerts import log_sink, webhook_sink
 from sentinel.audit.detect import Detector
 from sentinel.audit.log import AuditLog
@@ -86,13 +86,28 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
 
     # ---- optional per-agent auth (SENTINEL_AGENT_TOKENS / _FILE); a no-op when not configured
     class _AuthFail(Exception):
-        def __init__(self, status: int, code: str, msg: str, api: str | None):
-            self.status, self.code, self.msg, self.api = status, code, msg, api
+        def __init__(self, status: int, code: str, msg: str, api: str | None, retry_after: int = 0):
+            self.status, self.code, self.msg, self.api, self.retry_after = status, code, msg, api, retry_after
+
+    limiter = FailureLimiter.from_env()
+    app.state.limiter = limiter
 
     @app.exception_handler(_AuthFail)
     def _auth_failed(_: Request, e: _AuthFail):
         body = FORMATS[e.api].error(e.status, e.code, e.msg) if e.api else {"detail": e.msg}
-        return JSONResponse(body, status_code=e.status, headers={"WWW-Authenticate": "Bearer"} if e.status == 401 else None)
+        headers = {"WWW-Authenticate": "Bearer"} if e.status == 401 else {}
+        if e.retry_after:
+            headers["Retry-After"] = str(e.retry_after)
+        return JSONResponse(body, status_code=e.status, headers=headers or None)
+
+    def _client(request: Request) -> str:
+        return request.client.host if request.client else "?"
+
+    def _locked_out(request: Request, claimed: str, api: str | None) -> None:
+        wait = limiter.retry_after(_client(request))
+        if wait:
+            _auth_audit(request, claimed, "client locked out after repeated invalid tokens")
+            raise _AuthFail(429, "too_many_attempts", "too many invalid tokens; try again later", api, wait)
 
     _auth_seen: dict[tuple, float] = {}
 
@@ -113,10 +128,15 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
         def dep(request: Request) -> str | None:
             if auth is None:
                 return None
+            claimed0 = str(request.path_params.get("agent") or request.headers.get("x-sentinel-agent") or "")
+            _locked_out(request, claimed0, api)
             who, presented = auth.identify(request.headers)
             if who is None:
-                reason = "invalid agent token" if presented else "missing agent token"
-                _auth_audit(request, str(request.path_params.get("agent") or request.headers.get("x-sentinel-agent") or ""), reason)
+                reason = "missing agent token"
+                if presented:
+                    reason = "expired agent token" if auth.expired(request.headers) else "invalid agent token"
+                    limiter.failure(_client(request))
+                _auth_audit(request, claimed0, reason)
                 raise _AuthFail(401, "unauthorized", "a valid agent token is required", api)
             return who
         return dep
@@ -131,11 +151,15 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
 
     def health_gate(request: Request, x_sentinel_admin_token: str = Header(default="")):
         """/healthz takes any valid agent token or the admin token (the admin token is the only option while agent auth is off)."""
+        if auth is not None:
+            _locked_out(request, "", None)
         if hmac.compare_digest(x_sentinel_admin_token.encode(), admin_token):
             return
         if auth is not None and auth.identify(request.headers)[0] is not None:
             return
         sent = x_sentinel_admin_token or auth is not None and auth.identify(request.headers)[1]
+        if sent and auth is not None:
+            limiter.failure(_client(request))
         _auth_audit(request, "", "invalid token on /healthz" if sent else "missing token on /healthz")
         raise _AuthFail(401, "unauthorized", "a valid agent or admin token is required", None)
 
