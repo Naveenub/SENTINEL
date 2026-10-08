@@ -3,6 +3,8 @@ import os
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 
+from sentinel.audit.alerts import log_sink, webhook_sink
+from sentinel.audit.detect import Detector
 from sentinel.audit.log import AuditLog
 from sentinel.models import RunResponse, ScanRequest, ScanResponse, ToolDecision, ToolRequest
 from sentinel.pipeline import Pipeline
@@ -16,10 +18,25 @@ def create_app(sandbox: Sandbox | None = None) -> FastAPI:
     admin_token = os.environ["SENTINEL_ADMIN_TOKEN"].encode()
     log = AuditLog(os.getenv("SENTINEL_AUDIT_DB", "sentinel_audit.db"), key)
     engine = PolicyEngine(os.getenv("SENTINEL_POLICY", "policies/agents.yaml"))
+    detector = Detector(learn=int(os.getenv("SENTINEL_LEARN_CALLS", "50")),
+                        call_limit=int(os.getenv("SENTINEL_CALL_LIMIT", "60")),
+                        deny_limit=int(os.getenv("SENTINEL_DENY_LIMIT", "10")))
+    for ts, ev in log.events():  # rebuild baselines from history so a restart is not an amnesty
+        detector.observe(ev, now=ts, emit=False)
+    sinks = [log_sink] + ([webhook_sink(os.environ["SENTINEL_ALERT_WEBHOOK"])] if os.getenv("SENTINEL_ALERT_WEBHOOK") else [])
+
+    def on_event(ev: dict):
+        for a in detector.observe(ev):
+            log.append({"type": "alert", **a})  # alerts are themselves tamper-evident
+            for s in sinks:
+                s(a)
+
+    log.subscribe(on_event)
     pipe = Pipeline(engine, log, sandbox or Sandbox(), TokenBroker(key))
 
     app = FastAPI(title="SENTINEL")
     app.state.log = log
+    app.state.detector = detector
 
     def admin(x_sentinel_admin_token: str = Header(default="")):
         if not hmac.compare_digest(x_sentinel_admin_token.encode(), admin_token):
@@ -58,6 +75,10 @@ def create_app(sandbox: Sandbox | None = None) -> FastAPI:
     @app.post("/v1/approvals/{aid}/deny", dependencies=[Depends(admin)])
     def deny(aid: str):
         return _resolve(aid, False)
+
+    @app.get("/v1/alerts", dependencies=[Depends(admin)])
+    def alerts(limit: int = 50):
+        return log.recent("alert", min(max(limit, 1), 500))
 
     @app.get("/v1/audit/verify", dependencies=[Depends(admin)])
     def verify():

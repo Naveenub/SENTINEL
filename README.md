@@ -12,7 +12,7 @@
 
 A defense gateway that sits between **untrusted input**, the **model**, and **tools**. Every prompt, tool call, and output passes through five layers before anything touches the outside world.
 
-> **Status:** L1 to L4 and the L5 tamper-evident log are built and tested (26 tests). **Not built yet:** L5 anomaly detection and alerts (unusual tool sequences, spikes, new domains) and the red-team CI (garak / promptfoo).
+> **Status:** all five layers are built and tested: 69 tests plus a red-team corpus (11 documented detection gaps tracked as strict expected-failures). promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
 >
 > It is a **decision API**: your agent runtime calls `/v1/scan` before content reaches the model, `/v1/tool/authorize` before any tool runs, or `/v1/tool/run` to have SENTINEL run a tool end to end (authorize, sandbox, scan output, audit). It does not proxy model traffic.
 >
@@ -70,7 +70,7 @@ A defense gateway that sits between **untrusted input**, the **model**, and **to
 | L2 Tool policy | Deny-by-default, schema validation, rate limits, human approval | Built |
 | L3 Sandbox | Containers/microVMs, no ambient creds, egress allowlist, read-only FS | Built (verify on your host) |
 | L4 Secrets & data | Short-lived scoped tokens, output scanning | Built |
-| L5 Audit | Signed hash-chained log | Built. Anomaly alerts: not built |
+| L5 Audit | Signed hash-chained log + anomaly alerts | Built |
 
 **Stack:** Python / FastAPI proxy · YAML or OPA policy · gVisor / Firecracker · SQLite / Postgres · garak / promptfoo
 
@@ -92,7 +92,8 @@ sentinel/
 │   │   ├── tagger.py              # wraps external content as <untrusted> data
 │   │   └── classifier.py          # pluggable ML backend (NeMo Guardrails, Llama Guard, ...)
 │   ├── policy/                    # L2
-│   │   └── engine.py              # allowlist, JSON-schema args, rate limit, human approval
+│   │   ├── engine.py              # allowlist, JSON-schema args, host allowlist, rate limit, approval
+│   │   └── hosts.py               # extracts URL hosts from tool args (parsed, not regexed)
 │   ├── sandbox/                   # L3
 │   │   ├── runner.py              # hardened docker run (gVisor-ready), fails closed
 │   │   └── egress.py              # allowlisting HTTPS CONNECT proxy (blocks IP literals, private IPs)
@@ -100,18 +101,22 @@ sentinel/
 │   │   ├── broker.py              # short-lived scoped signed tokens, injected into sandbox env only
 │   │   └── scanner.py             # output scan: credentials withheld, PII/exfil redacted
 │   └── audit/                     # L5
-│       └── log.py                 # hash-chained, HMAC-signed, append-only SQLite log
+│       ├── log.py                 # hash-chained, HMAC-signed, append-only SQLite log
+│       ├── detect.py              # anomaly rules: spikes, new domains, unusual sequences, ...
+│       └── alerts.py              # alert sinks: log, webhook
 ├── policies/
 │   ├── agents.yaml                # per-agent tool allowlists, schemas, limits, approvals, sandbox, secrets
 │   └── egress.yaml                # hosts sandboxes may reach through the proxy
 ├── scripts/
 │   ├── approve.py                 # CLI: list / approve / deny pending actions
 │   └── verify_log.py              # CLI: verify audit chain offline
-└── tests/unit/
-    ├── test_core.py               # L1, L2, approvals, audit tamper detection
-    └── test_l3_l4.py              # sandbox flags, egress proxy, tokens, scanner, /v1/tool/run
-
-Planned:  tests/redteam/ (garak, promptfoo) · .github/workflows/ci.yml
+├── tests/
+│   ├── unit/                      # test_core.py, test_l3_l4.py, test_l5.py
+│   └── redteam/
+│       ├── cases/injection.yaml   # attacks, benign text, known gaps, known false positives
+│       ├── test_injection_corpus.py
+│       └── promptfooconfig.yaml   # same attacks through the live gateway via promptfoo
+└── .github/workflows/ci.yml       # pytest, then gateway + promptfoo
 ```
 
 ---
@@ -232,6 +237,42 @@ Write a class with `score(text) -> float` and set `SENTINEL_CLASSIFIER=my_pkg.ba
 pytest
 ```
 
+### 10. Alerts (L5)
+
+Every audit event is watched. Alerts are written back into the signed log as `alert` entries, logged, and optionally POSTed to a webhook (`SENTINEL_ALERT_WEBHOOK`).
+
+| Rule | Fires when |
+|---|---|
+| `deny_spike` | many denied calls from one agent in a minute |
+| `call_spike` | too many tool calls in a minute |
+| `tool_after_blocked_input` | an agent requests a tool right after its input was blocked as an injection |
+| `output_withheld` | a tool's output was withheld (credentials or injection in output) |
+| `new_domain` | first request to a host, after the agent's learning period |
+| `unusual_sequence` | a tool-to-tool transition never seen before, after the learning period |
+
+```bash
+curl -H "X-Sentinel-Admin-Token: $SENTINEL_ADMIN_TOKEN" http://127.0.0.1:8080/v1/alerts
+```
+
+Denied calls never teach the baseline, and baselines are rebuilt from the audit log on restart.
+
+For tools that fetch URLs, add `allowed_hosts` in `policies/agents.yaml` (see `fetch_docs`). Every URL in the args must point at a listed host; IP literals (like cloud metadata addresses) and `allowed.com@evil.com` tricks are denied. The plain `web_fetch` example is deliberately permissive.
+
+### 11. Red-team suite
+
+```bash
+pytest tests/redteam -rfEX            # corpus: attacks, benign text, known gaps
+```
+
+Current results on the bundled corpus (written by the same author as the rules, so treat it as a regression suite, not an independent benchmark): 16/16 attacks blocked, 10/10 benign allowed, **9 evasions undetected** (paraphrase, base64, Spanish, leetspeak, Cyrillic homoglyph, indirect task hijack, persona reset, authority claim) and **2 false positives** (a log line starting with `System:`, and a sentence about ignoring README instructions). Gaps are strict expected-failures: when you fix one, the suite fails until you move it to `attacks`.
+
+```bash
+python -m uvicorn --factory sentinel.main:create_app --port 8080 &
+npx promptfoo@0.124.0 eval -c tests/redteam/promptfooconfig.yaml --no-cache
+```
+
+CI (`.github/workflows/ci.yml`) runs both.
+
 ---
 
 ## Integrations and standards
@@ -239,11 +280,12 @@ pytest
 | Area | Approach |
 |---|---|
 | NVIDIA NeMo Guardrails / Jailbreak Detect NIM | Plug in via the classifier hook (L1) |
-| garak, promptfoo | Red-team suite in CI (planned) |
+| promptfoo | Wired in (HTTP provider against the live gateway); run for real, 8/8 |
+| garak | Not wired. It targets LLM endpoints, so it fits once SENTINEL proxies model traffic |
 | OPA | Planned alternative to YAML for L2 |
 | Regulated-industry expectations | Fail-closed defaults, separation of duties (agents cannot approve), single-use bound approvals, tamper-evident audit, content hashed in logs by default |
 
-Known limits: tokens are stateless bearer tokens (no revocation before expiry, capped at 5 minutes) and services must trust the SENTINEL key. The egress proxy is HTTPS-only. Credential detection is pattern-based, so unknown formats can slip through. HMAC signing is symmetric and tail truncation of the log is not detectable from the file alone (anchor `head` off-box for stronger guarantees). Approvals are in-memory and lost on restart. Agent-facing endpoints have no auth, so bind to localhost or put them behind your own network controls.
+Known limits: alerts **notify, they do not block** (a deny/approve decision is still L2's job). Per-tool `allowed_hosts` checks URLs inside args only, not bare hostnames. Detector learning periods are call-count based. The rule-based L1 misses paraphrase, encoded, foreign-language and homoglyph attacks (see the red-team corpus) and has known false positives; use the classifier hook for those. Tokens are stateless bearer tokens (no revocation before expiry, capped at 5 minutes) and services must trust the SENTINEL key. The egress proxy is HTTPS-only. Credential detection is pattern-based, so unknown formats can slip through. HMAC signing is symmetric and tail truncation of the log is not detectable from the file alone (anchor `head` off-box for stronger guarantees). Approvals are in-memory and lost on restart. Agent-facing endpoints have no auth, so bind to localhost or put them behind your own network controls.
 
 ---
 
@@ -252,7 +294,8 @@ Known limits: tokens are stateless bearer tokens (no revocation before expiry, c
 | When | Deliverable |
 |---|---|
 | Done | L1 input filter, L2 policy engine, L3 sandbox, L4 secrets and output scanning, L5 audit log |
-| Next | L5 anomaly detection and alerts; red-team suite (garak / promptfoo) wired into CI |
+| Done | L5 anomaly detection and alerts; red-team corpus + promptfoo + CI workflow |
+| Next | Ship a real classifier backend (NeMo Guardrails / Llama Guard) to close the corpus gaps; OPA policy option; proxy model traffic (then garak); token revocation |
 
 ## Design principles
 

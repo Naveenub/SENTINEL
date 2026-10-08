@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -21,6 +22,7 @@ class AuditLog:
             raise ValueError("SENTINEL_AUDIT_KEY must be at least 16 bytes")
         self._key = key
         self._lock = threading.Lock()
+        self._subs: list = []
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.executescript(
             """
@@ -41,6 +43,19 @@ class AuditLog:
     def _sign(self, h: str) -> str:
         return hmac.new(self._key, h.encode(), "sha256").hexdigest()
 
+    def subscribe(self, fn) -> None:
+        """fn(event) runs after every append, outside the lock. Errors are logged, never raised."""
+        self._subs.append(fn)
+
+    def events(self):
+        for ts, ev in self.db.execute("SELECT ts, event FROM entries ORDER BY id"):
+            yield ts, json.loads(ev)
+
+    def recent(self, type_: str, limit: int = 50) -> list[dict]:
+        rows = self.db.execute("SELECT event FROM entries WHERE event LIKE ? ORDER BY id DESC LIMIT ?",
+                               (f'%"type":"{type_}"%', limit)).fetchall()
+        return [json.loads(r[0]) for r in rows]
+
     def head(self) -> str:
         row = self.db.execute("SELECT hash FROM entries ORDER BY id DESC LIMIT 1").fetchone()
         return row[0] if row else GENESIS
@@ -55,6 +70,11 @@ class AuditLog:
                 (ts, ev, prev, h, self._sign(h)),
             )
             self.db.commit()
+        for fn in self._subs:
+            try:
+                fn(event)
+            except Exception:
+                logging.getLogger("sentinel.audit").exception("audit subscriber failed")
         return h
 
     def verify(self) -> tuple[bool, int | None]:

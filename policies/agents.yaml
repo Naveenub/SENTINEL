@@ -35,3 +35,12 @@ agents:
           network: none             # or "proxy" for allowlisted egress
           timeout: 10
           memory: 256m
+      fetch_docs:                   # strict variant of web_fetch: every URL must hit an allowed host
+        schema:
+          type: object
+          properties:
+            url: { type: string, pattern: "^https://" }
+          required: [url]
+          additionalProperties: false
+        allowed_hosts: [docs.python.org, "*.github.com"]
+        rate_limit: 30/min

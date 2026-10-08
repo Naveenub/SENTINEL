@@ -8,6 +8,7 @@ from sentinel.input_filter.rules import scan_text
 from sentinel.input_filter.tagger import tag
 from sentinel.models import Finding, Item, RunResponse, ScanRequest, ScanResponse, ToolDecision, ToolRequest
 from sentinel.policy.engine import PolicyEngine
+from sentinel.policy.hosts import extract_hosts
 from sentinel.sandbox.runner import Sandbox, SandboxUnavailable
 from sentinel.secrets.broker import TokenBroker
 from sentinel.secrets.scanner import scan_output
@@ -51,7 +52,7 @@ class Pipeline:
         d = self.engine.authorize(req.agent, req.tool, req.args, req.approval_id)
         self.log.append({
             "type": "tool", "agent": req.agent, "tool": req.tool, "decision": d.decision,
-            "reason": d.reason, "approval_id": d.approval_id,
+            "reason": d.reason, "approval_id": d.approval_id, "hosts": extract_hosts(req.args),
             "args_sha256": hashlib.sha256(repr(sorted(req.args.items())).encode()).hexdigest(),
             **({"args": req.args} if self.log_content else {}),
         })

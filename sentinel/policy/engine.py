@@ -9,6 +9,8 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from sentinel.models import ToolDecision
+from sentinel.policy.hosts import extract_hosts
+from sentinel.sandbox.egress import EgressAllowlist
 
 _UNITS = {"sec": 1, "min": 60, "hour": 3600}
 
@@ -45,6 +47,7 @@ class PolicyEngine:
                     "sandbox": sb,
                     "secrets": list(spec.get("secrets") or []),
                     "token_ttl": int(spec.get("token_ttl", 60)),
+                    "hosts": EgressAllowlist(spec["allowed_hosts"]) if "allowed_hosts" in spec else None,
                     "validator": Draft202012Validator(spec["schema"]),
                     "rate": _rate(spec["rate_limit"]) if "rate_limit" in spec else None,
                     "approval": spec.get("approval") == "required",
@@ -60,6 +63,10 @@ class PolicyEngine:
         errs = sorted(e.message for e in spec["validator"].iter_errors(args))
         if errs:
             return ToolDecision(decision="deny", reason=f"schema: {errs[0]}")
+        if spec["hosts"] is not None:  # every URL in the args must point at an allowed host
+            bad = [h for h in extract_hosts(args) if not spec["hosts"].allows(h)]
+            if bad:
+                return ToolDecision(decision="deny", reason=f"host not allowed: {bad[0]}")
         with self._lock:
             if spec["rate"]:
                 n, window = spec["rate"]
