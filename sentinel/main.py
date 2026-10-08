@@ -2,7 +2,7 @@ import hmac
 import os
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from sentinel.audit.alerts import log_sink, webhook_sink
@@ -118,6 +118,9 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
     if proxy:
         def _call(agent: str, body: dict, api: str, version: str):
             status, payload = proxy.handle(agent, body, api, version)
+            if proxy.streams(body, status, payload, api):  # buffered streaming: scanned in full, then re-emitted
+                return StreamingResponse(proxy.events(api, payload, body), media_type="text/event-stream",
+                                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
             return JSONResponse(payload, status_code=status)
 
         def _need_agent(api: str):

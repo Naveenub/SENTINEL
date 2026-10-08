@@ -12,7 +12,7 @@
 
 A defense gateway that sits between **untrusted input**, the **model**, and **tools**. Every prompt, tool call, and output passes through five layers before anything touches the outside world.
 
-> **Status:** all five layers are built and tested: 131 tests (132 with the `opa` binary on PATH) plus a red-team corpus (11 documented detection gaps tracked as strict expected-failures). promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
+> **Status:** all five layers are built and tested: 145 tests (146 with the `opa` binary on PATH) plus a red-team corpus (11 documented detection gaps tracked as strict expected-failures). promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
 >
 > **ML classifier backends (NVIDIA JailbreakDetect NIM, Meta Prompt Guard 2) are implemented but not measured against real models.** I could not download models or reach an NIM from the build environment. The NIM client is tested against a local server implementing NVIDIA's documented API, and Prompt Guard against a stand-in pipeline. Run `scripts/eval_classifier.py` on your machine to get real numbers before relying on either.
 >
@@ -357,7 +357,9 @@ The upstream must speak the format you call (the proxy does not translate betwee
 
 Anthropic specifics: `tool_result` blocks are treated as external data (scanned, wrapped `<untrusted>`); `tool_use` blocks are the proposed calls; the top-level `system` prompt is trusted and not scanned; refusal mode returns a `message` with `stop_reason: "refusal"`.
 
-Limits: `stream=true` is rejected (output cannot be scanned before it is sent); only text is scanned (images, audio, documents pass through); system prompt, assistant history and reasoning fields are not scanned. Clean text is cached by hash so a growing conversation is not rescanned every turn.
+**Streaming (`stream=true`) is buffered, not pass-through.** SENTINEL calls the upstream non-streaming, scans and preflights the *complete* reply, and only then re-emits it to the agent as SSE in the caller's format (`chat.completion.chunk` + `[DONE]` for OpenAI; `message_start` ... `message_stop` for Anthropic). Agent code that sets `stream=true` works unchanged and nothing unscanned is ever sent. Consequences: there is **no time-to-first-token benefit** (the whole reply is held until it is scanned; size `SENTINEL_UPSTREAM_TIMEOUT` for full generation time), and real pass-through streaming cannot be made safe for credential withholding. A blocked or failed streamed request returns an ordinary JSON error (403 / 502 / upstream status), as providers do for failures before the first event; in `refusal` block mode the refusal is streamed like a normal reply. `stream` and `stream_options` are never forwarded upstream, but `stream_options.include_usage` is honoured in the re-emitted stream. Set `SENTINEL_PROXY_STREAM=reject` to get the old behaviour (400 `streaming_unsupported`). Audit `model` events for streamed requests carry `stream: "buffered"`.
+
+Limits: only text is scanned (images, audio, documents pass through); system prompt, assistant history and reasoning fields are not scanned. Clean text is cached by hash so a growing conversation is not rescanned every turn.
 
 **garak** now fits because there is an LLM endpoint to aim it at. Run the same probes straight at the model and through SENTINEL; the gap is what the gateway stops.
 
@@ -383,7 +385,7 @@ garak scores model behaviour, so a result is "model + SENTINEL", not SENTINEL al
 | OPA | Optional L2 decision backend (section 12), tested against a real OPA server |
 | Regulated-industry expectations | Fail-closed defaults, separation of duties (agents cannot approve), single-use bound approvals, tamper-evident audit, content hashed in logs by default |
 
-Known limits: the ML backends are unmeasured on real models (see the status note), and a classifier is itself attackable, so keep L2 to L4 in place. Alerts **notify, they do not block** (a deny/approve decision is still L2's job). Per-tool `allowed_hosts` checks URLs inside args only, not bare hostnames. Detector learning periods are call-count based. The rule-based L1 misses paraphrase, encoded, foreign-language and homoglyph attacks (see the red-team corpus) and has known false positives; use the classifier hook for those. Tokens are signed bearer tokens capped at 5 minutes; revocation is enforced only for verifiers that call `/v1/token/verify` (offline verification with the shared key cannot see it) and services must trust the SENTINEL key. The model proxy does not support streaming and does not scan non-text content. The egress proxy is HTTPS-only. Credential detection is pattern-based, so unknown formats can slip through. HMAC signing is symmetric and tail truncation of the log is not detectable from the file alone (anchor `head` off-box for stronger guarantees). Approvals are in-memory and lost on restart. Agent-facing endpoints have no auth, so bind to localhost or put them behind your own network controls.
+Known limits: the ML backends are unmeasured on real models (see the status note), and a classifier is itself attackable, so keep L2 to L4 in place. Alerts **notify, they do not block** (a deny/approve decision is still L2's job). Per-tool `allowed_hosts` checks URLs inside args only, not bare hostnames. Detector learning periods are call-count based. The rule-based L1 misses paraphrase, encoded, foreign-language and homoglyph attacks (see the red-team corpus) and has known false positives; use the classifier hook for those. Tokens are signed bearer tokens capped at 5 minutes; revocation is enforced only for verifiers that call `/v1/token/verify` (offline verification with the shared key cannot see it) and services must trust the SENTINEL key. The model proxy streams only in buffered mode (no latency benefit) and does not scan non-text content. The egress proxy is HTTPS-only. Credential detection is pattern-based, so unknown formats can slip through. HMAC signing is symmetric and tail truncation of the log is not detectable from the file alone (anchor `head` off-box for stronger guarantees). Approvals are in-memory and lost on restart. Agent-facing endpoints have no auth, so bind to localhost or put them behind your own network controls.
 
 ---
 
@@ -395,7 +397,7 @@ Known limits: the ML backends are unmeasured on real models (see the status note
 | Done | L5 anomaly detection and alerts; red-team corpus + promptfoo + CI workflow |
 | Done | Classifier backends: NVIDIA JailbreakDetect NIM, Prompt Guard 2, ensemble, fail-closed error policy |
 | Done | OPA policy option; token revocation; model proxy (OpenAI + Anthropic formats); garak harness |
-| Next | Measure the ML backends and a garak baseline on your hardware and tune the threshold; streaming through the proxy |
+| Next | Measure the ML backends and a garak baseline on your hardware and tune the threshold |
 
 ## Design principles
 

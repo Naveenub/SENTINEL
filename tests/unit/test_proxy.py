@@ -71,8 +71,8 @@ def test_header_route_requires_agent_and_path_route_works(make):
                   headers={"X-Sentinel-Agent": "research-bot"}).status_code == 200
 
 
-def test_unknown_agent_and_streaming_rejected(make):
-    c = make(Upstream())
+def test_unknown_agent_and_streaming_reject_mode(make):
+    c = make(Upstream(), SENTINEL_PROXY_STREAM="reject")
     msgs = [{"role": "user", "content": "hi"}]
     assert c.post("/proxy/ghost/v1/chat/completions", json={"model": "m", "messages": msgs}).status_code == 403
     r = c.post(BASE, json={"model": "m", "messages": msgs, "stream": True})

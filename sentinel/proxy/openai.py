@@ -8,7 +8,7 @@ no provider key; SENTINEL holds it (SENTINEL_UPSTREAM_KEY).
              response. Rate limits and human approval still happen when the runtime executes the call.
   audit:     one "model" event per request (hashes only unless SENTINEL_LOG_CONTENT=1)
 
-Not supported (fail closed): stream=true, because output cannot be scanned before it is sent.
+Streaming: stream=true is served as buffered SSE (see model.py); SENTINEL_PROXY_STREAM=reject disables it.
 Not scanned: non-text content parts (images, audio), system/assistant history, reasoning fields.
 """
 import copy

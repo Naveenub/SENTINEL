@@ -1,7 +1,9 @@
 """Wire formats the model proxy understands. A format knows where text and tool calls live in a
 request/response; the proxy core (model.py) does the scanning, wrapping, preflight and audit."""
+import json
+import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 
 @dataclass
@@ -21,6 +23,11 @@ def _text_parts(content, put_str):
         for part in content:
             if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
                 yield (lambda v, p=part: p.__setitem__("text", v)), part["text"]
+
+
+def _sse(data: dict, event: str | None = None) -> bytes:
+    head = f"event: {event}\n" if event else ""
+    return f"{head}data: {json.dumps(data, separators=(',', ':'))}\n\n".encode()
 
 
 class OpenAIFormat:
@@ -62,6 +69,50 @@ class OpenAIFormat:
                 except ValueError:
                     args = None
                 yield str(fn.get("name") or ""), args if isinstance(args, dict) else None
+
+
+    def is_message(self, data: dict) -> bool:
+        return isinstance(data.get("choices"), list)
+
+    def sse(self, data: dict, request: dict) -> Iterator[bytes]:
+        """Re-emit a complete, already-scanned chat.completion as chat.completion.chunk SSE events."""
+        base = {"id": data.get("id") or "sentinel-stream", "object": "chat.completion.chunk",
+                "created": data.get("created") or int(time.time()), "model": data.get("model") or request.get("model") or ""}
+        if data.get("system_fingerprint"):
+            base["system_fingerprint"] = data["system_fingerprint"]
+
+        def chunk(choices, **extra):
+            return _sse({**base, "choices": choices, **extra})
+
+        choices = [c for c in data.get("choices") or [] if isinstance(c, dict)]
+        for i, c in enumerate(choices):
+            idx = c.get("index", i)
+            msg = c.get("message") or {}
+            first = {"role": msg.get("role") or "assistant"}
+            # fields we do not interpret (reasoning_content, annotations, ...) ride along with the role chunk
+            first.update({k: v for k, v in msg.items() if k not in ("role", "content", "tool_calls", "function_call")})
+            if "content" in msg and msg["content"] is not None:
+                first["content"] = ""
+            yield chunk([{"index": idx, "delta": first, "finish_reason": None}])
+            content = msg.get("content")
+            if isinstance(content, str) and content:
+                yield chunk([{"index": idx, "delta": {"content": content}, "finish_reason": None}])
+            elif isinstance(content, list):  # content parts: flatten text for the delta stream
+                text = "".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
+                if text:
+                    yield chunk([{"index": idx, "delta": {"content": text}, "finish_reason": None}])
+            for j, tc in enumerate(msg.get("tool_calls") or []):
+                fn = (tc or {}).get("function") or {}
+                yield chunk([{"index": idx, "finish_reason": None, "delta": {"tool_calls": [{
+                    "index": j, "id": (tc or {}).get("id"), "type": (tc or {}).get("type") or "function",
+                    "function": {"name": fn.get("name") or "", "arguments": fn.get("arguments") or ""}}]}}])
+            if isinstance(msg.get("function_call"), dict):
+                yield chunk([{"index": idx, "delta": {"function_call": msg["function_call"]}, "finish_reason": None}])
+            yield chunk([{"index": idx, "delta": {}, "finish_reason": c.get("finish_reason") or "stop"}])
+        opts = request.get("stream_options")
+        if isinstance(opts, dict) and opts.get("include_usage"):
+            yield chunk([], usage=data.get("usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+        yield b"data: [DONE]\n\n"
 
     def error(self, status: int, code: str, message: str, **extra) -> dict:
         return {"error": {"type": "sentinel_blocked" if status == 403 else "sentinel_error",
@@ -115,6 +166,51 @@ class AnthropicFormat:
             if isinstance(blk, dict) and blk.get("type") == "tool_use":
                 args: Any = blk.get("input", {})
                 yield str(blk.get("name") or ""), args if isinstance(args, dict) else None
+
+
+    def is_message(self, data: dict) -> bool:
+        return data.get("type") == "message"
+
+    def sse(self, data: dict, request: dict) -> Iterator[bytes]:
+        """Re-emit a complete, already-scanned message as the Messages streaming event sequence."""
+        usage = data.get("usage") or {}
+        start = {**{k: v for k, v in data.items() if k not in ("content", "stop_reason", "stop_sequence", "usage")},
+                 "content": [], "stop_reason": None, "stop_sequence": None, "usage": {**usage, "output_tokens": 0}}
+        yield _sse({"type": "message_start", "message": start}, "message_start")
+        yield _sse({"type": "ping"}, "ping")
+        blocks = [b for b in data.get("content") or [] if isinstance(b, dict)]
+        for i, b in enumerate(blocks):
+            t = b.get("type")
+
+            def delta(d, i=i):
+                return _sse({"type": "content_block_delta", "index": i, "delta": d}, "content_block_delta")
+
+            if t == "text":
+                yield _sse({"type": "content_block_start", "index": i,
+                            "content_block": {"type": "text", "text": ""}}, "content_block_start")
+                if b.get("text"):
+                    yield delta({"type": "text_delta", "text": b["text"]})
+                for cit in b.get("citations") or []:
+                    yield delta({"type": "citations_delta", "citation": cit})
+            elif t in ("tool_use", "server_tool_use"):
+                yield _sse({"type": "content_block_start", "index": i,
+                            "content_block": {**{k: v for k, v in b.items() if k != "input"}, "input": {}}},
+                           "content_block_start")
+                yield delta({"type": "input_json_delta", "partial_json": json.dumps(b.get("input", {}))})
+            elif t == "thinking":
+                yield _sse({"type": "content_block_start", "index": i,
+                            "content_block": {"type": "thinking", "thinking": ""}}, "content_block_start")
+                if b.get("thinking"):
+                    yield delta({"type": "thinking_delta", "thinking": b["thinking"]})
+                if b.get("signature"):
+                    yield delta({"type": "signature_delta", "signature": b["signature"]})
+            else:  # redacted_thinking, *_tool_result and anything newer arrive whole in content_block_start
+                yield _sse({"type": "content_block_start", "index": i, "content_block": b}, "content_block_start")
+            yield _sse({"type": "content_block_stop", "index": i}, "content_block_stop")
+        yield _sse({"type": "message_delta", "delta": {"stop_reason": data.get("stop_reason"),
+                                                       "stop_sequence": data.get("stop_sequence")},
+                    "usage": {"output_tokens": usage.get("output_tokens", 0)}}, "message_delta")
+        yield _sse({"type": "message_stop"}, "message_stop")
 
     def error(self, status: int, code: str, message: str, **extra) -> dict:
         return {"type": "error", "error": {"type": "sentinel_blocked" if status == 403 else "sentinel_error",

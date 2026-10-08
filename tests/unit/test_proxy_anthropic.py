@@ -73,8 +73,8 @@ def test_header_route_needs_agent_with_anthropic_error_shape(make):
                   json={"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}]}).status_code == 200
 
 
-def test_unknown_agent_stream_and_bad_body(make):
-    c = make(Upstream())
+def test_unknown_agent_stream_reject_mode_and_bad_body(make):
+    c = make(Upstream(), SENTINEL_PROXY_STREAM="reject")
     ok = {"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}]}
     assert c.post("/proxy/ghost/v1/messages", json=ok).status_code == 403
     assert c.post(BASE, json={**ok, "stream": True}).json()["error"]["code"] == "streaming_unsupported"
