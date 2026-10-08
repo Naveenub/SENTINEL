@@ -83,9 +83,11 @@ def test_token_cannot_act_as_another_agent(make):
 
 def test_open_endpoints_and_separate_admin_credential(make):
     c = make()
-    assert c.get("/healthz").status_code == 200
-    assert c.get("/healthz").json() == {"ok": True}   # liveness only: no classifier, fail mode or backend detail
-    assert c.get("/healthz?detail=1").json() == {"ok": True}   # a query flag does not unlock detail
+    assert c.get("/healthz").status_code == 401
+    assert c.get("/healthz", headers=bearer("wrong-token-0123456789")).status_code == 401
+    assert c.get("/healthz", headers={"X-Sentinel-Admin-Token": "nope"}).status_code == 401
+    for h in (bearer(RB), {"x-api-key": GT}, ADMIN):
+        assert c.get("/healthz?detail=1", headers=h).json() == {"ok": True}   # liveness only; a query flag does not unlock detail
     assert c.get("/v1/status").status_code == 403
     assert c.get("/v1/status", headers=bearer(RB)).status_code == 403   # an agent token is not an admin token
     st = c.get("/v1/status", headers=ADMIN).json()
@@ -97,6 +99,8 @@ def test_open_endpoints_and_separate_admin_credential(make):
 
 def test_auth_is_off_without_tokens(make, monkeypatch):
     monkeypatch.delenv("SENTINEL_AGENT_TOKENS")
+    c = make()
+    assert c.get("/healthz").status_code == 401 and c.get("/healthz", headers=ADMIN).status_code == 200
     assert make().post("/v1/scan", json=SCAN).status_code == 200
 
 

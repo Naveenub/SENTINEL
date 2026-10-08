@@ -129,11 +129,20 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
 
     plain_auth, oai_auth, ant_auth = _agent_auth(), _agent_auth("openai"), _agent_auth("anthropic")
 
-    @app.get("/healthz")
+    def health_gate(request: Request, x_sentinel_admin_token: str = Header(default="")):
+        """/healthz takes any valid agent token or the admin token (the admin token is the only option while agent auth is off)."""
+        if hmac.compare_digest(x_sentinel_admin_token.encode(), admin_token):
+            return
+        if auth is not None and auth.identify(request.headers)[0] is not None:
+            return
+        sent = x_sentinel_admin_token or auth is not None and auth.identify(request.headers)[1]
+        _auth_audit(request, "", "invalid token on /healthz" if sent else "missing token on /healthz")
+        raise _AuthFail(401, "unauthorized", "a valid agent or admin token is required", None)
+
+    @app.get("/healthz", dependencies=[Depends(health_gate)])
     def healthz():
-        """Liveness only, for load balancers and Docker health checks. Deliberately reveals nothing about
-        configuration: classifier, fail mode and policy backend would tell an unauthenticated caller how
-        input screening is set up. Detail lives at /v1/status behind the admin token."""
+        """Liveness, behind any valid agent token or the admin token. Still returns only {"ok": true}; detail
+        (classifier, fail mode, policy backend) lives at /v1/status behind the admin token."""
         return {"ok": True}
 
     @app.get("/v1/status", dependencies=[Depends(admin)])

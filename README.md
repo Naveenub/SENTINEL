@@ -394,7 +394,7 @@ Anthropic(base_url="http://127.0.0.1:8080/proxy/research-bot", api_key=AGENT_TOK
 ```
 
 - **Fail closed.** An agent with no token configured cannot authenticate once auth is on. Startup refuses tokens that are under 16 characters, name an agent missing from policy, are shared by two agents, or equal the admin or verifier token (an agent must not be able to approve its own requests).
-- **Open by design (no agent token):** `/healthz`, which returns only `{"ok": true}` (liveness for load balancers and Docker health checks). Classifier, fail mode, policy backend and proxy state are served at `GET /v1/status` with the admin token. Admin and verifier endpoints keep their own credentials, which an agent token does not satisfy.
+- **`/healthz`** needs any valid agent token or the admin token (`X-Sentinel-Admin-Token`), and returns only `{"ok": true}`. Probes that cannot send headers (some load balancers, Docker `HEALTHCHECK` without a header) cannot use it. Classifier, fail mode, policy backend and proxy state are served at `GET /v1/status` with the admin token. Admin and verifier endpoints keep their own credentials, which an agent token does not satisfy.
 - **Audit.** Failures are logged as `auth` events (agent claimed, reason, client address, path; never the token), at most one per agent, reason and client every 10 seconds so an unauthenticated caller cannot flood the log. No alert rule watches them yet.
 - **Not provided:** TLS (tokens are bearer secrets, so use localhost, a TLS-terminating proxy or a private network), per-token expiry, and rate limiting of failed attempts.
 
