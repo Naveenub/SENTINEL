@@ -12,13 +12,13 @@
 
 A defense gateway that sits between **untrusted input**, the **model**, and **tools**. Every prompt, tool call, and output passes through five layers before anything touches the outside world.
 
-> **Status:** all five layers are built and tested: 118 tests (119 with the `opa` binary on PATH) plus a red-team corpus (11 documented detection gaps tracked as strict expected-failures). promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
+> **Status:** all five layers are built and tested: 131 tests (132 with the `opa` binary on PATH) plus a red-team corpus (11 documented detection gaps tracked as strict expected-failures). promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
 >
 > **ML classifier backends (NVIDIA JailbreakDetect NIM, Meta Prompt Guard 2) are implemented but not measured against real models.** I could not download models or reach an NIM from the build environment. The NIM client is tested against a local server implementing NVIDIA's documented API, and Prompt Guard against a stand-in pipeline. Run `scripts/eval_classifier.py` on your machine to get real numbers before relying on either.
 >
-> It is a **decision API**: your agent runtime calls `/v1/scan` before content reaches the model, `/v1/tool/authorize` before any tool runs, or `/v1/tool/run` to have SENTINEL run a tool end to end (authorize, sandbox, scan output, audit). Optionally it also fronts your model endpoint (OpenAI-compatible, see section 14), so prompts and completions are screened without agent-side changes.
+> It is a **decision API**: your agent runtime calls `/v1/scan` before content reaches the model, `/v1/tool/authorize` before any tool runs, or `/v1/tool/run` to have SENTINEL run a tool end to end (authorize, sandbox, scan output, audit). Optionally it also fronts your model endpoint (OpenAI-compatible or Anthropic Messages, see section 14), so prompts and completions are screened without agent-side changes.
 >
-> **OPA** is tested against a real OPA server (`opa test` plus integration tests). **garak:** `scripts/garak_scan.sh` uses flags checked against garak 0.17's source, but I did not run a scan in the build environment (garak pulls torch/CUDA). The model proxy is tested against a fake upstream, not a live provider.
+> **OPA** is tested against a real OPA server (`opa test` plus integration tests). **garak:** `scripts/garak_scan.sh` uses flags checked against garak 0.17's source, but I did not run a scan in the build environment (garak pulls torch/CUDA). The model proxy is tested against fake upstreams and driven end to end by the official `anthropic` SDK, but not against a live provider.
 >
 > **Not yet verified against a real container runtime:** the sandbox command line is unit-tested and the runner fails closed without Docker, but I could not execute real containers or gVisor in the build environment. Run the smoke test under "Sandbox" below on your host before trusting L3.
 
@@ -111,7 +111,8 @@ sentinel/
 │   │   ├── revocation.py          # persistent jti denylist + per-agent kill switch
 │   │   └── scanner.py             # output scan: credentials withheld, PII/exfil redacted
 │   ├── proxy/
-│   │   └── openai.py              # OpenAI-compatible model proxy: scan in, scan out, preflight tool calls
+│   │   ├── model.py               # model proxy core: scan in, scan out, preflight tool calls, audit
+│   │   └── formats.py             # wire formats: OpenAI chat-completions, Anthropic Messages
 │   └── audit/                     # L5
 │       ├── log.py                 # hash-chained, HMAC-signed, append-only SQLite log
 │       ├── detect.py              # anomaly rules: spikes, new domains, unusual sequences, ...
@@ -340,9 +341,12 @@ OPA receives `{agent, tool, args, hosts}` and returns `data.sentinel.authz.decis
 Set `SENTINEL_UPSTREAM_URL` (and `SENTINEL_UPSTREAM_KEY`; the gateway holds it, agents never see a provider key) and point your agent's OpenAI client at SENTINEL:
 
 ```python
-client = OpenAI(base_url="http://127.0.0.1:8080/proxy/research-bot/v1", api_key="unused")
-# or base_url=".../v1" with header X-Sentinel-Agent: research-bot
+OpenAI(base_url="http://127.0.0.1:8080/proxy/research-bot/v1", api_key="unused")        # /v1/chat/completions
+Anthropic(base_url="http://127.0.0.1:8080/proxy/research-bot", api_key="unused")        # /v1/messages
+# or POST /v1/chat/completions | /v1/messages on the gateway root with header X-Sentinel-Agent: research-bot
 ```
+
+The upstream must speak the format you call (the proxy does not translate between them). The agent's own `Authorization` / `x-api-key` / `anthropic-beta` headers are never forwarded; `anthropic-version` is (default `2023-06-01`).
 
 | Direction | What happens |
 |---|---|
@@ -351,7 +355,9 @@ client = OpenAI(base_url="http://127.0.0.1:8080/proxy/research-bot/v1", api_key=
 | Response tool calls | Each proposed call is preflighted against L2 (allowlist, schema, hosts, OPA). Any denial blocks the response (403 `tool_denied`). Rate limits and human approval still apply when your runtime calls `/v1/tool/authorize`; preflight consumes neither |
 | Audit | One `model` event per request (hashes only unless `SENTINEL_LOG_CONTENT=1`); denied proposed calls also log as `tool` events so `deny_spike` sees them |
 
-Limits: `stream=true` is rejected (output cannot be scanned before it is sent); only text parts are scanned (images/audio pass through); system and assistant history and reasoning fields are not scanned; OpenAI chat-completions format only. Clean text is cached by hash so a growing conversation is not rescanned every turn.
+Anthropic specifics: `tool_result` blocks are treated as external data (scanned, wrapped `<untrusted>`); `tool_use` blocks are the proposed calls; the top-level `system` prompt is trusted and not scanned; refusal mode returns a `message` with `stop_reason: "refusal"`.
+
+Limits: `stream=true` is rejected (output cannot be scanned before it is sent); only text is scanned (images, audio, documents pass through); system prompt, assistant history and reasoning fields are not scanned. Clean text is cached by hash so a growing conversation is not rescanned every turn.
 
 **garak** now fits because there is an LLM endpoint to aim it at. Run the same probes straight at the model and through SENTINEL; the gap is what the gateway stops.
 
@@ -388,8 +394,8 @@ Known limits: the ML backends are unmeasured on real models (see the status note
 | Done | L1 input filter, L2 policy engine, L3 sandbox, L4 secrets and output scanning, L5 audit log |
 | Done | L5 anomaly detection and alerts; red-team corpus + promptfoo + CI workflow |
 | Done | Classifier backends: NVIDIA JailbreakDetect NIM, Prompt Guard 2, ensemble, fail-closed error policy |
-| Done | OPA policy option; token revocation; OpenAI-compatible model proxy; garak harness |
-| Next | Measure the ML backends and a garak baseline on your hardware and tune the threshold; streaming through the proxy; Anthropic `/v1/messages` format |
+| Done | OPA policy option; token revocation; model proxy (OpenAI + Anthropic formats); garak harness |
+| Next | Measure the ML backends and a garak baseline on your hardware and tune the threshold; streaming through the proxy |
 
 ## Design principles
 

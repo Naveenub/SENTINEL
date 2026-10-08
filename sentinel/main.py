@@ -12,7 +12,8 @@ from sentinel.models import RunResponse, ScanRequest, ScanResponse, ToolDecision
 from sentinel.pipeline import Pipeline
 from sentinel.policy.engine import PolicyEngine
 from sentinel.policy.opa import OPAClient
-from sentinel.proxy.openai import from_env as proxy_from_env
+from sentinel.proxy.formats import FORMATS
+from sentinel.proxy.model import from_env as proxy_from_env
 from sentinel.sandbox.runner import Sandbox
 from sentinel.secrets.broker import TokenBroker
 from sentinel.secrets.revocation import RevocationStore
@@ -113,22 +114,31 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
         log.append({"type": "revoke", "agent": agent, "cutoff": cutoff})
         return {"agent": agent, "revoked_before": cutoff}
 
-    # ---- model proxy (OpenAI-compatible); only mounted when SENTINEL_UPSTREAM_URL is set
+    # ---- model proxy (OpenAI chat-completions and Anthropic messages); mounted only when SENTINEL_UPSTREAM_URL is set
     if proxy:
-        def _chat(agent: str, body: dict):
-            status, payload = proxy.handle(agent, body)
+        def _call(agent: str, body: dict, api: str, version: str):
+            status, payload = proxy.handle(agent, body, api, version)
             return JSONResponse(payload, status_code=status)
+
+        def _need_agent(api: str):
+            return JSONResponse(FORMATS[api].error(400, "missing_agent", "X-Sentinel-Agent header required"), status_code=400)
 
         @app.post("/v1/chat/completions")
         def chat_header(body: dict = Body(...), x_sentinel_agent: str = Header(default="")):
-            if not x_sentinel_agent:
-                return JSONResponse({"error": {"type": "sentinel_error", "code": "missing_agent",
-                                               "message": "X-Sentinel-Agent header required"}}, status_code=400)
-            return _chat(x_sentinel_agent, body)
+            return _call(x_sentinel_agent, body, "openai", "") if x_sentinel_agent else _need_agent("openai")
 
-        @app.post("/proxy/{agent}/v1/chat/completions")  # base_url style: http://gw/proxy/<agent>/v1
+        @app.post("/proxy/{agent}/v1/chat/completions")  # OpenAI base_url: http://gw/proxy/<agent>/v1
         def chat_path(agent: str, body: dict = Body(...)):
-            return _chat(agent, body)
+            return _call(agent, body, "openai", "")
+
+        @app.post("/v1/messages")
+        def messages_header(body: dict = Body(...), x_sentinel_agent: str = Header(default=""),
+                            anthropic_version: str = Header(default="")):
+            return _call(x_sentinel_agent, body, "anthropic", anthropic_version) if x_sentinel_agent else _need_agent("anthropic")
+
+        @app.post("/proxy/{agent}/v1/messages")  # Anthropic base_url: http://gw/proxy/<agent>
+        def messages_path(agent: str, body: dict = Body(...), anthropic_version: str = Header(default="")):
+            return _call(agent, body, "anthropic", anthropic_version)
 
     @app.get("/v1/approvals", dependencies=[Depends(admin)])
     def approvals():
