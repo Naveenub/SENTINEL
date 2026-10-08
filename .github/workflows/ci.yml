@@ -8,6 +8,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
+      - uses: open-policy-agent/setup-opa@v2
+        with: { version: latest }
+      - run: opa test policies/opa -v
       - run: pip install -e ".[dev]"
       # unit tests + red-team corpus (strict xfails fail the build if a known gap gets fixed: move it to attacks)
       - run: pytest -q -rfEX
