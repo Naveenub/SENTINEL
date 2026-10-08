@@ -4,7 +4,9 @@ environment only; they never enter the prompt, the model context, or the audit l
 Tokens are bearer credentials signed with a key derived from SENTINEL_AUDIT_KEY (domain-separated).
 Services that trust SENTINEL verify them with the same key. For third-party APIs, exchange the token
 for a vendor credential inside a service you control.
-# ponytail: stateless, so no single-use/revocation; add a jti denylist if you need revocation.
+Revocation: verify() consults a RevocationStore (jti denylist + per-agent cutoff), so a token can be
+killed before it expires. Services must verify through the gateway (POST /v1/token/verify) to see
+revocations; verifying offline with the shared key checks signature and expiry only.
 """
 import base64
 import hashlib
@@ -12,6 +14,8 @@ import hmac
 import json
 import secrets
 import time
+
+from sentinel.secrets.revocation import RevocationStore
 
 MAX_TTL = 300
 
@@ -25,16 +29,24 @@ def _unb64(s: str) -> bytes:
 
 
 class TokenBroker:
-    def __init__(self, master_key: bytes):
+    def __init__(self, master_key: bytes, store: RevocationStore | None = None):
         self._key = hmac.new(master_key, b"sentinel-token-v1", hashlib.sha256).digest()
+        self.store = store or RevocationStore()  # in-memory unless the caller supplies a persistent one
+
+    def revoke(self, jti: str, reason: str = "") -> None:
+        self.store.revoke_jti(jti, reason)
+
+    def revoke_agent(self, agent: str) -> float:
+        return self.store.revoke_agent(agent)
 
     def _sig(self, body: str) -> str:
         return _b64(hmac.new(self._key, body.encode(), hashlib.sha256).digest())
 
     def issue(self, agent: str, tool: str, scopes: list[str], ttl: int = 60) -> tuple[str, str]:
         jti = secrets.token_hex(8)
+        now = time.time()
         claims = {"agent": agent, "tool": tool, "scopes": sorted(scopes), "jti": jti,
-                  "exp": int(time.time()) + max(1, min(ttl, MAX_TTL))}
+                  "iat": round(now, 3), "exp": int(now) + max(1, min(ttl, MAX_TTL))}
         body = _b64(json.dumps(claims, sort_keys=True).encode())
         return f"snt1.{body}.{self._sig(body)}", jti
 
@@ -47,5 +59,7 @@ class TokenBroker:
         except Exception:
             return None
         if claims["exp"] < time.time() or (scope and scope not in claims["scopes"]):
+            return None
+        if self.store.is_revoked(claims["jti"], claims["agent"], claims.get("iat", 0.0)):
             return None
         return claims

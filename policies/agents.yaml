@@ -44,3 +44,5 @@ agents:
           additionalProperties: false
         allowed_hosts: [docs.python.org, "*.github.com"]
         rate_limit: 30/min
+  garak-target:                     # model-proxy-only agent for garak scans: may call the model, no tools
+    tools: {}

@@ -89,6 +89,9 @@ class Pipeline:
         except SandboxUnavailable as e:
             self.log.append({**ev, "decision": "deny", "reason": f"sandbox unavailable: {e}"})
             return RunResponse(decision="deny", reason="sandbox unavailable (fail closed)")
+        finally:
+            if jti:  # a token lives exactly as long as the call it was minted for
+                self.broker.revoke(jti, "tool call finished")
         if res.timed_out:
             self.log.append({**ev, "decision": "allow", "timed_out": True})
             return RunResponse(decision="allow", reason="tool timed out and was killed")

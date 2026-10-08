@@ -1,0 +1,10 @@
+{
+  "grants": {
+    "research-bot": {
+      "web_fetch": {},
+      "fetch_docs": {"hosts": ["docs.python.org", "*.github.com"]},
+      "summarize_report": {},
+      "shell": {"approval": true}
+    }
+  }
+}

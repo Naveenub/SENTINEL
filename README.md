@@ -12,11 +12,13 @@
 
 A defense gateway that sits between **untrusted input**, the **model**, and **tools**. Every prompt, tool call, and output passes through five layers before anything touches the outside world.
 
-> **Status:** all five layers are built and tested: 85 tests plus a red-team corpus (11 documented detection gaps tracked as strict expected-failures). promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
+> **Status:** all five layers are built and tested: 118 tests (119 with the `opa` binary on PATH) plus a red-team corpus (11 documented detection gaps tracked as strict expected-failures). promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
 >
 > **ML classifier backends (NVIDIA JailbreakDetect NIM, Meta Prompt Guard 2) are implemented but not measured against real models.** I could not download models or reach an NIM from the build environment. The NIM client is tested against a local server implementing NVIDIA's documented API, and Prompt Guard against a stand-in pipeline. Run `scripts/eval_classifier.py` on your machine to get real numbers before relying on either.
 >
-> It is a **decision API**: your agent runtime calls `/v1/scan` before content reaches the model, `/v1/tool/authorize` before any tool runs, or `/v1/tool/run` to have SENTINEL run a tool end to end (authorize, sandbox, scan output, audit). It does not proxy model traffic.
+> It is a **decision API**: your agent runtime calls `/v1/scan` before content reaches the model, `/v1/tool/authorize` before any tool runs, or `/v1/tool/run` to have SENTINEL run a tool end to end (authorize, sandbox, scan output, audit). Optionally it also fronts your model endpoint (OpenAI-compatible, see section 14), so prompts and completions are screened without agent-side changes.
+>
+> **OPA** is tested against a real OPA server (`opa test` plus integration tests). **garak:** `scripts/garak_scan.sh` uses flags checked against garak 0.17's source, but I did not run a scan in the build environment (garak pulls torch/CUDA). The model proxy is tested against a fake upstream, not a live provider.
 >
 > **Not yet verified against a real container runtime:** the sandbox command line is unit-tested and the runner fails closed without Docker, but I could not execute real containers or gVisor in the build environment. Run the smoke test under "Sandbox" below on your host before trusting L3.
 
@@ -98,24 +100,30 @@ sentinel/
 │   │       ├── prompt_guard.py    # Meta Llama Prompt Guard 2 (local, via transformers)
 │   │       └── chunking.py        # overlapping windows; oversize input raises, never truncates
 │   ├── policy/                    # L2
-│   │   ├── engine.py              # allowlist, JSON-schema args, host allowlist, rate limit, approval
+│   │   ├── engine.py              # allowlist, JSON-schema args, host allowlist, rate limit, approval, preflight
+│   │   ├── opa.py                 # OPA REST client (fail closed); optional backend
 │   │   └── hosts.py               # extracts URL hosts from tool args (parsed, not regexed)
 │   ├── sandbox/                   # L3
 │   │   ├── runner.py              # hardened docker run (gVisor-ready), fails closed
 │   │   └── egress.py              # allowlisting HTTPS CONNECT proxy (blocks IP literals, private IPs)
 │   ├── secrets/                   # L4
 │   │   ├── broker.py              # short-lived scoped signed tokens, injected into sandbox env only
+│   │   ├── revocation.py          # persistent jti denylist + per-agent kill switch
 │   │   └── scanner.py             # output scan: credentials withheld, PII/exfil redacted
+│   ├── proxy/
+│   │   └── openai.py              # OpenAI-compatible model proxy: scan in, scan out, preflight tool calls
 │   └── audit/                     # L5
 │       ├── log.py                 # hash-chained, HMAC-signed, append-only SQLite log
 │       ├── detect.py              # anomaly rules: spikes, new domains, unusual sequences, ...
 │       └── alerts.py              # alert sinks: log, webhook
 ├── policies/
 │   ├── agents.yaml                # per-agent tool allowlists, schemas, limits, approvals, sandbox, secrets
+│   ├── opa/                       # sentinel.rego + data.json + tests, used when SENTINEL_POLICY_BACKEND=opa
 │   └── egress.yaml                # hosts sandboxes may reach through the proxy
 ├── scripts/
 │   ├── approve.py                 # CLI: list / approve / deny pending actions
 │   ├── eval_classifier.py         # measure rules + classifier on the red-team corpus
+│   ├── garak_scan.sh              # garak against the model directly vs through SENTINEL
 │   └── verify_log.py              # CLI: verify audit chain offline
 ├── tests/
 │   ├── unit/                      # test_core.py, test_l3_l4.py, test_l5.py, test_classifier.py
@@ -303,6 +311,59 @@ npx promptfoo@0.124.0 eval -c tests/redteam/promptfooconfig.yaml --no-cache
 
 CI (`.github/workflows/ci.yml`) runs both.
 
+### 12. OPA policy backend (L2)
+
+YAML keeps describing what each tool *is* (JSON Schema, sandbox, secrets, rate limit). OPA decides who may call it.
+
+```bash
+opa run --server --addr 127.0.0.1:8181 policies/opa      # sentinel.rego + data.json
+export SENTINEL_POLICY_BACKEND=opa SENTINEL_OPA_URL=http://127.0.0.1:8181
+opa test policies/opa -v
+```
+
+OPA receives `{agent, tool, args, hosts}` and returns `data.sentinel.authz.decision = {effect: allow|deny|approve, reason}`.
+
+- **Strictest wins.** Schema, YAML `allowed_hosts` and `approval: required` still apply; OPA can only add restrictions or require approval. A tool must exist in YAML, so OPA cannot invent one.
+- **Fail closed.** OPA down, timeout, undefined result, unknown effect: deny, and a `policy_backend_degraded` alert fires. Startup fails if OPA is unreachable or the policy is not loaded.
+- The example policy shows what YAML cannot do: it inspects argument content (`rm -rf` is denied even for an agent with an approval grant).
+- Rate limits and approvals stay in the gateway (they need state); OPA stays a pure decision function.
+
+### 13. Token revocation (L4)
+
+- A token is revoked automatically **when its tool call finishes** (the container has exited, so nothing legitimate still needs it).
+- Admin: `POST /v1/tokens/{jti}/revoke` (find the jti in the `run` audit entries) and `POST /v1/agents/{agent}/revoke-tokens` (kills every token that agent holds now; tokens issued afterwards work).
+- The denylist is in SQLite (`SENTINEL_REVOKE_DB`, default the audit DB), survives restarts, and prunes itself once a revoked token could no longer be valid. Admin revocations are written to the audit log.
+- **Services must verify through the gateway** to see revocations: `POST /v1/token/verify {token, scope}`. Authenticate with `X-Sentinel-Verifier-Token` (`SENTINEL_VERIFIER_TOKEN`) so services never hold the admin token. Verifying offline with the shared key checks signature and expiry only.
+
+### 14. Model-traffic proxy (and garak)
+
+Set `SENTINEL_UPSTREAM_URL` (and `SENTINEL_UPSTREAM_KEY`; the gateway holds it, agents never see a provider key) and point your agent's OpenAI client at SENTINEL:
+
+```python
+client = OpenAI(base_url="http://127.0.0.1:8080/proxy/research-bot/v1", api_key="unused")
+# or base_url=".../v1" with header X-Sentinel-Agent: research-bot
+```
+
+| Direction | What happens |
+|---|---|
+| Request | `user` messages are scanned (L1); `tool` messages are scanned **and wrapped as `<untrusted>`**. Blocked: 403 `input_blocked`, upstream never called |
+| Response text | L4 output scan: credentials withhold the response (403 `output_withheld`), PII/exfil is redacted |
+| Response tool calls | Each proposed call is preflighted against L2 (allowlist, schema, hosts, OPA). Any denial blocks the response (403 `tool_denied`). Rate limits and human approval still apply when your runtime calls `/v1/tool/authorize`; preflight consumes neither |
+| Audit | One `model` event per request (hashes only unless `SENTINEL_LOG_CONTENT=1`); denied proposed calls also log as `tool` events so `deny_spike` sees them |
+
+Limits: `stream=true` is rejected (output cannot be scanned before it is sent); only text parts are scanned (images/audio pass through); system and assistant history and reasoning fields are not scanned; OpenAI chat-completions format only. Clean text is cached by hash so a growing conversation is not rescanned every turn.
+
+**garak** now fits because there is an LLM endpoint to aim it at. Run the same probes straight at the model and through SENTINEL; the gap is what the gateway stops.
+
+```bash
+pip install garak
+export SENTINEL_PROXY_BLOCK_MODE=refusal     # blocks come back as a 200 content_filter completion; garak aborts on HTTP errors
+scripts/garak_scan.sh direct <model>         # baseline (needs UPSTREAM_URI, UPSTREAM_KEY)
+scripts/garak_scan.sh proxy  <model>         # through SENTINEL as agent "garak-target" (no tools)
+```
+
+garak scores model behaviour, so a result is "model + SENTINEL", not SENTINEL alone. The rules-only L1 will miss many garak probes (encodings, paraphrase); run with a classifier backend for a meaningful number.
+
 ---
 
 ## Integrations and standards
@@ -312,11 +373,11 @@ CI (`.github/workflows/ci.yml`) runs both.
 | NVIDIA NemoGuard JailbreakDetect NIM | Built-in `nim` backend (L1). NeMo Guardrails itself (the framework) is not used |
 | Meta Llama Prompt Guard 2 | Built-in `prompt_guard` backend (L1) |
 | promptfoo | Wired in (HTTP provider against the live gateway); run for real, 8/8 |
-| garak | Not wired. It targets LLM endpoints, so it fits once SENTINEL proxies model traffic |
-| OPA | Planned alternative to YAML for L2 |
+| garak | `scripts/garak_scan.sh` runs it against the model directly or through the proxy (section 14); not executed in the build environment |
+| OPA | Optional L2 decision backend (section 12), tested against a real OPA server |
 | Regulated-industry expectations | Fail-closed defaults, separation of duties (agents cannot approve), single-use bound approvals, tamper-evident audit, content hashed in logs by default |
 
-Known limits: the ML backends are unmeasured on real models (see the status note), and a classifier is itself attackable, so keep L2 to L4 in place. Alerts **notify, they do not block** (a deny/approve decision is still L2's job). Per-tool `allowed_hosts` checks URLs inside args only, not bare hostnames. Detector learning periods are call-count based. The rule-based L1 misses paraphrase, encoded, foreign-language and homoglyph attacks (see the red-team corpus) and has known false positives; use the classifier hook for those. Tokens are stateless bearer tokens (no revocation before expiry, capped at 5 minutes) and services must trust the SENTINEL key. The egress proxy is HTTPS-only. Credential detection is pattern-based, so unknown formats can slip through. HMAC signing is symmetric and tail truncation of the log is not detectable from the file alone (anchor `head` off-box for stronger guarantees). Approvals are in-memory and lost on restart. Agent-facing endpoints have no auth, so bind to localhost or put them behind your own network controls.
+Known limits: the ML backends are unmeasured on real models (see the status note), and a classifier is itself attackable, so keep L2 to L4 in place. Alerts **notify, they do not block** (a deny/approve decision is still L2's job). Per-tool `allowed_hosts` checks URLs inside args only, not bare hostnames. Detector learning periods are call-count based. The rule-based L1 misses paraphrase, encoded, foreign-language and homoglyph attacks (see the red-team corpus) and has known false positives; use the classifier hook for those. Tokens are signed bearer tokens capped at 5 minutes; revocation is enforced only for verifiers that call `/v1/token/verify` (offline verification with the shared key cannot see it) and services must trust the SENTINEL key. The model proxy does not support streaming and does not scan non-text content. The egress proxy is HTTPS-only. Credential detection is pattern-based, so unknown formats can slip through. HMAC signing is symmetric and tail truncation of the log is not detectable from the file alone (anchor `head` off-box for stronger guarantees). Approvals are in-memory and lost on restart. Agent-facing endpoints have no auth, so bind to localhost or put them behind your own network controls.
 
 ---
 
@@ -327,7 +388,8 @@ Known limits: the ML backends are unmeasured on real models (see the status note
 | Done | L1 input filter, L2 policy engine, L3 sandbox, L4 secrets and output scanning, L5 audit log |
 | Done | L5 anomaly detection and alerts; red-team corpus + promptfoo + CI workflow |
 | Done | Classifier backends: NVIDIA JailbreakDetect NIM, Prompt Guard 2, ensemble, fail-closed error policy |
-| Next | Measure the backends on your hardware and tune the threshold; OPA policy option; proxy model traffic (then garak); token revocation |
+| Done | OPA policy option; token revocation; OpenAI-compatible model proxy; garak harness |
+| Next | Measure the ML backends and a garak baseline on your hardware and tune the threshold; streaming through the proxy; Anthropic `/v1/messages` format |
 
 ## Design principles
 

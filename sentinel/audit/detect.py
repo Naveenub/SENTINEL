@@ -1,6 +1,6 @@
 """L5 anomaly detection over audit events. Pure logic: feed events in, get alerts out.
 
-Rules: deny_spike, call_spike, tool_after_blocked_input, output_withheld, and (after a learning
+Rules: policy_backend_degraded (OPA down/invalid), deny_spike, call_spike, tool_after_blocked_input, output_withheld, and (after a learning
 period of allowed calls per agent) new_domain and unusual_sequence. Denied calls never teach the
 baseline, so an attacker cannot normalise a new domain by failing against it first.
 # ponytail: baselines are rebuilt from the audit log at startup (see main.py), but the learning
@@ -50,6 +50,8 @@ class Detector:
             return out if emit else []
 
         denied = ev.get("decision") == "deny"
+        if kind == "tool" and str(ev.get("reason", "")).startswith("opa "):
+            alert("policy_backend_degraded", "high", f"OPA problem: {ev['reason']}")
         if denied:
             n = self._bump(self._denies[agent], now)
             if n >= self.deny_limit:

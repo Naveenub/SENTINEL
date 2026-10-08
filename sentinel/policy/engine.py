@@ -27,9 +27,11 @@ def _fp(agent: str, tool: str, args: dict) -> str:
 class PolicyEngine:
     """Deny-by-default. Order: allowlist -> arg schema -> rate limit -> human approval."""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, opa=None):
         with open(path) as f:
             cfg = yaml.safe_load(f) or {}
+        self._opa = opa  # None = YAML decides; else OPA must also allow (see policy/opa.py)
+        self._agents = set((cfg.get("agents") or {}).keys())
         self._tools: dict[tuple[str, str], dict] = {}
         for agent, a in (cfg.get("agents") or {}).items():
             for tool, spec in (a.get("tools") or {}).items():
@@ -56,17 +58,40 @@ class PolicyEngine:
         self._approvals: dict[str, dict] = {}
         self._lock = threading.Lock()
 
-    def authorize(self, agent: str, tool: str, args: dict, approval_id: str | None = None) -> ToolDecision:
+    def has_agent(self, agent: str) -> bool:
+        return agent in self._agents
+
+    def _check(self, agent: str, tool: str, args: dict) -> tuple[ToolDecision | None, bool]:
+        """Side-effect-free checks: allowlist -> schema -> hosts -> OPA. Returns (deny | None, approval_needed)."""
         spec = self._tools.get((agent, tool))
         if spec is None:
-            return ToolDecision(decision="deny", reason="not in allowlist")
+            return ToolDecision(decision="deny", reason="not in allowlist"), False
         errs = sorted(e.message for e in spec["validator"].iter_errors(args))
         if errs:
-            return ToolDecision(decision="deny", reason=f"schema: {errs[0]}")
+            return ToolDecision(decision="deny", reason=f"schema: {errs[0]}"), False
         if spec["hosts"] is not None:  # every URL in the args must point at an allowed host
             bad = [h for h in extract_hosts(args) if not spec["hosts"].allows(h)]
             if bad:
-                return ToolDecision(decision="deny", reason=f"host not allowed: {bad[0]}")
+                return ToolDecision(decision="deny", reason=f"host not allowed: {bad[0]}"), False
+        need = spec["approval"]
+        if self._opa is not None:
+            effect, reason = self._opa.decide(agent, tool, args, extract_hosts(args))
+            if effect == "deny":
+                return ToolDecision(decision="deny", reason=reason), False
+            need = need or effect == "approve"  # stricter wins
+        return None, need
+
+    def preflight(self, agent: str, tool: str, args: dict) -> ToolDecision:
+        """Can this call ever be allowed? No rate limit, no approval record: used on model-proposed
+        tool calls, which are authorized again (for real) when the runtime executes them."""
+        deny, _ = self._check(agent, tool, args)
+        return deny or ToolDecision(decision="allow", reason="preflight ok")
+
+    def authorize(self, agent: str, tool: str, args: dict, approval_id: str | None = None) -> ToolDecision:
+        deny, need_approval = self._check(agent, tool, args)
+        if deny:
+            return deny
+        spec = self._tools[(agent, tool)]
         with self._lock:
             if spec["rate"]:
                 n, window = spec["rate"]
@@ -76,7 +101,7 @@ class PolicyEngine:
                 if len(q) >= n:
                     return ToolDecision(decision="deny", reason="rate limit exceeded")
                 q.append(now)
-            if not spec["approval"]:
+            if not need_approval:
                 return ToolDecision(decision="allow", reason="policy ok")
             fp = _fp(agent, tool, args)
             if approval_id is None:
