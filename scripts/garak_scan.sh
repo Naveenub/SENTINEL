@@ -10,7 +10,11 @@ set -euo pipefail
 mode=${1:?proxy|direct}; model=${2:?model name}
 spec=${3:-probes.promptinject,probes.encoding,probes.latentinjection,probes.dan}
 case "$mode" in
-  proxy)  uri="${SENTINEL_GATEWAY:-http://127.0.0.1:8080}/proxy/garak-target/v1/"; key="${SENTINEL_AGENT_TOKEN:-unused}" ;;  # token only if agent auth is on
+  proxy)  uri="${SENTINEL_GATEWAY:-http://127.0.0.1:8080}/proxy/garak-target/v1/"
+          if [[ -z "${SENTINEL_AGENT_TOKEN:-}" ]]; then
+            echo "warning: SENTINEL_AGENT_TOKEN unset; fine only if agent auth is off. With SENTINEL_AGENT_TOKENS set on the gateway this will 401 and can trigger client lockout." >&2
+          fi
+          key="${SENTINEL_AGENT_TOKEN:-unused}" ;;  # token only if agent auth is on
   direct) uri="${UPSTREAM_URI:?set UPSTREAM_URI, e.g. https://api.openai.com/v1/}"; key="${UPSTREAM_KEY:?set UPSTREAM_KEY}" ;;
   *) echo "mode must be proxy or direct" >&2; exit 2 ;;
 esac
