@@ -1,6 +1,7 @@
 # Anything not listed is denied. Every tool needs a JSON Schema (validated at startup).
 agents:
   research-bot:
+    non_text: allow       # model proxy: allow (default) | block images/audio/documents, which are never scanned
     tools:
       web_fetch:
         schema:
@@ -45,4 +46,5 @@ agents:
         allowed_hosts: [docs.python.org, "*.github.com"]
         rate_limit: 30/min
   garak-target:                     # model-proxy-only agent for garak scans: may call the model, no tools
+    non_text: block
     tools: {}

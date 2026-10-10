@@ -33,9 +33,15 @@ class PolicyEngine:
             cfg = yaml.safe_load(f) or {}
         self._opa = opa  # None = YAML decides; else OPA must also allow (see policy/opa.py)
         self._agents = set((cfg.get("agents") or {}).keys())
+        self._non_text: dict[str, str] = {}
+        for agent, a in (cfg.get("agents") or {}).items():
+            mode = (a or {}).get("non_text", "allow")
+            if mode not in ("allow", "block"):  # fail closed at load
+                raise ValueError(f"{agent}: non_text must be allow or block")
+            self._non_text[agent] = mode
         self._tools: dict[tuple[str, str], dict] = {}
         for agent, a in (cfg.get("agents") or {}).items():
-            for tool, spec in (a.get("tools") or {}).items():
+            for tool, spec in ((a or {}).get("tools") or {}).items():
                 if "schema" not in spec:  # fail closed at load, not at call time
                     raise ValueError(f"{agent}.{tool}: 'schema' is required")
                 Draft202012Validator.check_schema(spec["schema"])
@@ -61,6 +67,10 @@ class PolicyEngine:
 
     def has_agent(self, agent: str) -> bool:
         return agent in self._agents
+
+    def blocks_non_text(self, agent: str) -> bool:
+        """True when the agent's policy forbids images/audio/documents on the model proxy."""
+        return self._non_text.get(agent, "allow") == "block"
 
     @property
     def agent_names(self) -> set[str]:

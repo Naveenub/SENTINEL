@@ -25,6 +25,14 @@ def _text_parts(content, put_str):
                 yield (lambda v, p=part: p.__setitem__("text", v)), part["text"]
 
 
+def _kinds(content, text_types=("text",)):
+    """Types of non-text parts in a content value (a plain str has none)."""
+    if not isinstance(content, list):
+        return []
+    return [str(p.get("type") or "unknown") if isinstance(p, dict) else "unknown"
+            for p in content if not (isinstance(p, dict) and p.get("type") in text_types)]
+
+
 CHUNK = 32  # characters per emitted delta, so client UIs see token-like streaming (cosmetic; reply is already scanned)
 
 
@@ -59,6 +67,14 @@ class OpenAIFormat:
             for setter, text in _text_parts(m.get("content"), lambda v, m=m: m.__setitem__("content", v)):
                 out.append(Span(src, ref, text, setter, wrap=src == "external"))
         return out
+
+    def non_text(self, body: dict) -> list[str]:
+        """Non-text part types in scanned roles (user, tool, function), e.g. image_url, input_audio, file."""
+        out: list[str] = []
+        for m in body["messages"]:
+            if m.get("role") in ("user", "tool", "function"):
+                out += _kinds(m.get("content"))
+        return sorted(set(out))
 
     def outbound_texts(self, data: dict):
         for c in data.get("choices") or []:
@@ -138,7 +154,7 @@ class OpenAIFormat:
 
 class AnthropicFormat:
     """Anthropic Messages API. `system` is trusted (developer-set) and not scanned; tool_result blocks
-    are external data; assistant turns are skipped; image/document blocks are not scanned."""
+    are external data; assistant turns are skipped; image/document blocks are not scanned (block them per agent with non_text: block)."""
     name = "anthropic"
     path = "/messages"
     DEFAULT_VERSION = "2023-06-01"
@@ -165,6 +181,19 @@ class AnthropicFormat:
                     for setter, text in _text_parts(blk.get("content"), lambda v, b=blk: b.__setitem__("content", v)):
                         out.append(Span("external", ref, text, setter, wrap=True))
         return out
+
+    def non_text(self, body: dict) -> list[str]:
+        """Non-text block types in user turns, including inside tool_result content (image, document, ...)."""
+        out: list[str] = []
+        for m in body["messages"]:
+            if m.get("role") != "user":
+                continue
+            c = m.get("content")
+            out += _kinds(c, ("text", "tool_result"))
+            for blk in (c if isinstance(c, list) else []):
+                if isinstance(blk, dict) and blk.get("type") == "tool_result":
+                    out += _kinds(blk.get("content"))
+        return sorted(set(out))
 
     def outbound_texts(self, data: dict):
         for blk in data.get("content") or []:

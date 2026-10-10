@@ -15,6 +15,7 @@ streaming cannot be made safe for credential withholding. SENTINEL_PROXY_STREAM=
 Blocks and upstream errors on a stream request are returned as ordinary JSON errors (status 403/502/...), as the
 providers themselves do for failures before the first event.
 Not scanned: non-text content (images, audio, documents), system prompt, assistant history, reasoning.
+Per-agent `non_text: block` in agents.yaml rejects any request carrying non-text content (403 non_text_blocked).
 One upstream serves both formats only if it speaks both (e.g. LiteLLM); otherwise use the one you run.
 """
 import copy
@@ -86,6 +87,13 @@ class ModelProxy:
             return 400, fmt.error(400, "streaming_unsupported", "stream=true is not supported through SENTINEL")
         if not fmt.valid(body):
             return 400, fmt.error(400, "bad_request", "messages must be a list of objects")
+
+        if self.pipe.engine.blocks_non_text(agent):
+            kinds = fmt.non_text(body)
+            if kinds:
+                aud("deny", "non-text content blocked", non_text=kinds)
+                return self._blocked(fmt, "non_text_blocked", "non-text content is not allowed for this agent",
+                                     model, kinds=kinds)
 
         # 1. inbound: scan what has not already scanned clean, then wrap tool results as untrusted data
         body = copy.deepcopy(body)  # from here on, only the copy is rewritten and forwarded

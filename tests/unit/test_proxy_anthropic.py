@@ -169,3 +169,42 @@ def test_both_formats_share_the_clean_text_cache_and_openai_still_works(make):
     before = len(c.app.state.log.recent("scan", 50))
     c.post("/proxy/research-bot/v1/chat/completions", json={"model": "m", "messages": [{"role": "user", "content": "hello"}]})
     assert len(c.app.state.log.recent("scan", 50)) == before
+
+
+IMG = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+
+
+def test_non_text_allowed_by_default(make):
+    c = make(Upstream())
+    r = msg(c, [{"type": "text", "text": "hi"}, IMG])
+    assert r.status_code == 200 and c.up.seen
+
+
+def test_non_text_blocked_per_agent(make):
+    c = make(Upstream())
+    r = c.post("/proxy/garak-target/v1/messages", json={"model": "m", "max_tokens": 8, "messages": [
+        {"role": "user", "content": [{"type": "text", "text": "hi"}, IMG]}]})
+    assert r.status_code == 403 and r.json()["error"]["code"] == "non_text_blocked"
+    assert r.json()["error"]["kinds"] == ["image"] and not c.up.seen
+
+
+def test_non_text_blocked_inside_tool_result(make):
+    c = make(Upstream())
+    r = c.post("/proxy/garak-target/v1/messages", json={"model": "m", "max_tokens": 8, "messages": [
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": [IMG]}]}]})
+    assert r.status_code == 403 and not c.up.seen
+
+
+def test_text_only_passes_for_blocking_agent(make):
+    c = make(Upstream())
+    r = c.post("/proxy/garak-target/v1/messages", json={"model": "m", "max_tokens": 8, "messages": [
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]}]})
+    assert r.status_code == 200
+
+
+def test_bad_non_text_value_fails_at_load(tmp_path):
+    from sentinel.policy.engine import PolicyEngine
+    p = tmp_path / "a.yaml"
+    p.write_text("agents:\n  a:\n    non_text: maybe\n    tools: {}\n")
+    with pytest.raises(ValueError):
+        PolicyEngine(str(p))

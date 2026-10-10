@@ -187,3 +187,14 @@ def test_proxy_not_mounted_without_upstream(tmp_path, monkeypatch):
     monkeypatch.delenv("SENTINEL_UPSTREAM_URL", raising=False)
     c = TestClient(create_app())
     assert c.post(BASE, json={}).status_code == 404 and c.get("/v1/status", headers=ADMIN).json()["model_proxy"] is False
+
+
+def test_openai_non_text_formats():
+    from sentinel.proxy.formats import FORMATS
+    f = FORMATS["openai"]
+    body = {"messages": [{"role": "user", "content": [{"type": "text", "text": "x"},
+                                                       {"type": "image_url", "image_url": {"url": "u"}},
+                                                       {"type": "input_audio", "input_audio": {}}]},
+                         {"role": "tool", "content": "ok"}]}
+    assert f.non_text(body) == ["image_url", "input_audio"]
+    assert f.non_text({"messages": [{"role": "user", "content": "plain"}]}) == []
