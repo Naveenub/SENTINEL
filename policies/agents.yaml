@@ -2,7 +2,7 @@
 agents:
   research-bot:
     non_text: allow       # model proxy: allow (default) | block images/audio/documents, which are never scanned
-    # redacted_thinking: strip    # default forward; strip drops opaque redacted_thinking blocks from replayed history
+    # redacted_thinking: strip    # default forward; strip drops opaque redacted_thinking blocks from earlier replayed turns (the open tool loop keeps them)
     # scan: [system, assistant]   # opt-in model-proxy scan of the system prompt and replayed assistant history
     tools:
       web_fetch:

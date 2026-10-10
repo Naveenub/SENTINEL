@@ -18,7 +18,8 @@ Not scanned: non-text content (images, audio, documents), system prompt, assista
 Opt-in per agent (agents.yaml `scan: [system, assistant]`): scan the system prompt (user tolerance) and replayed
 assistant turns (external tolerance: text, tool-call arguments/inputs, thinking). They are scanned but never rewritten or wrapped.
 Per-agent `redacted_thinking: strip` removes opaque redacted_thinking blocks from replayed history (default
-forward: they are unreadable and must be echoed back unmodified; stripping breaks tool loops that need them).
+forward: they are unreadable and must be echoed back unmodified). Blocks in the open tool-use loop, i.e. after the
+last non-tool-result user turn, are always kept so extended thinking with tools keeps working.
 Per-agent `non_text: block` in agents.yaml rejects any request carrying non-text content (403 non_text_blocked).
 One upstream serves both formats only if it speaks both (e.g. LiteLLM); otherwise use the one you run.
 """

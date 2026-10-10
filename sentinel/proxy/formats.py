@@ -252,11 +252,20 @@ class AnthropicFormat:
 
     def strip_redacted(self, body: dict) -> int:
         """Remove opaque redacted_thinking blocks from assistant history (in place); returns how many.
-        An assistant turn left with no content is dropped. Breaks tool loops that must echo them back."""
-        n, keep = 0, []
-        for m in body["messages"]:
+        Assistant turns after the last real user turn (the open tool-use loop) are kept: the API requires
+        those blocks echoed back. An earlier assistant turn left with no content is dropped."""
+        msgs = body["messages"]
+
+        def real_user(m):  # a user turn that is not purely tool results
             c = m.get("content")
-            if m.get("role") == "assistant" and isinstance(c, list):
+            return m.get("role") == "user" and not (
+                isinstance(c, list) and c and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in c))
+
+        cut = max((i for i, m in enumerate(msgs) if real_user(m)), default=-1)
+        n, keep = 0, []
+        for i, m in enumerate(msgs):
+            c = m.get("content")
+            if i < cut and m.get("role") == "assistant" and isinstance(c, list):
                 kept = [b for b in c if not (isinstance(b, dict) and b.get("type") == "redacted_thinking")]
                 n += len(c) - len(kept)
                 if not kept:

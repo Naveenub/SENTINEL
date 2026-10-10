@@ -324,3 +324,24 @@ def test_bad_redacted_thinking_value_fails_at_load(tmp_path):
     p.write_text("agents:\n  a:\n    redacted_thinking: drop\n    tools: {}\n")
     with pytest.raises(ValueError):
         PolicyEngine(str(p))
+
+
+def test_redacted_thinking_kept_in_open_tool_loop(make, tmp_path, monkeypatch):
+    import yaml
+    cfg = yaml.safe_load(open(POLICY))
+    cfg["agents"]["research-bot"]["redacted_thinking"] = "strip"
+    p = tmp_path / "p.yaml"
+    p.write_text(yaml.safe_dump(cfg))
+    monkeypatch.setenv("SENTINEL_POLICY", str(p))
+    c = make(Upstream())
+    rt = {"type": "redacted_thinking", "data": "ENC"}
+    tool = {"type": "tool_use", "id": "t1", "name": "web_fetch", "input": {"url": "https://docs.python.org"}}
+    msgs = [{"role": "user", "content": "old"},
+            {"role": "assistant", "content": [dict(rt), {"type": "text", "text": "a"}]},
+            {"role": "user", "content": "new"},
+            {"role": "assistant", "content": [dict(rt), dict(tool)]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}]
+    assert c.post(BASE, json={"model": "m", "max_tokens": 8, "messages": msgs}).status_code == 200
+    sent = c.up.seen[0][2]["messages"]
+    assert sent[1]["content"] == [{"type": "text", "text": "a"}]
+    assert sent[3]["content"][0] == rt and len(sent) == 5
