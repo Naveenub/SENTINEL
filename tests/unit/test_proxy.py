@@ -198,3 +198,15 @@ def test_openai_non_text_formats():
                          {"role": "tool", "content": "ok"}]}
     assert f.non_text(body) == ["image_url", "input_audio"]
     assert f.non_text({"messages": [{"role": "user", "content": "plain"}]}) == []
+
+
+def test_openai_inbound_extra_scan_spans():
+    from sentinel.proxy.formats import FORMATS
+    f = FORMATS["openai"]
+    body = {"messages": [{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
+                         {"role": "assistant", "content": [{"type": "text", "text": "a"}]}]}
+    assert [x.ref for x in f.inbound(body)] == ["model-proxy:user"]
+    spans = f.inbound(body, frozenset({"system", "assistant"}))
+    assert [(x.source, x.ref, x.wrap) for x in spans] == [
+        ("user", "model-proxy:system", False), ("user", "model-proxy:user", False),
+        ("external", "model-proxy:assistant", False)]

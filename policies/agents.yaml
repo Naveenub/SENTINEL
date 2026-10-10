@@ -2,6 +2,7 @@
 agents:
   research-bot:
     non_text: allow       # model proxy: allow (default) | block images/audio/documents, which are never scanned
+    # scan: [system, assistant]   # opt-in model-proxy scan of the system prompt and replayed assistant history
     tools:
       web_fetch:
         schema:

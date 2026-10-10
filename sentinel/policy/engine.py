@@ -34,11 +34,16 @@ class PolicyEngine:
         self._opa = opa  # None = YAML decides; else OPA must also allow (see policy/opa.py)
         self._agents = set((cfg.get("agents") or {}).keys())
         self._non_text: dict[str, str] = {}
+        self._scan: dict[str, frozenset] = {}
         for agent, a in (cfg.get("agents") or {}).items():
             mode = (a or {}).get("non_text", "allow")
             if mode not in ("allow", "block"):  # fail closed at load
                 raise ValueError(f"{agent}: non_text must be allow or block")
             self._non_text[agent] = mode
+            extra = (a or {}).get("scan") or []
+            if not isinstance(extra, list) or not set(extra) <= {"system", "assistant"}:
+                raise ValueError(f"{agent}: scan must be a list drawn from [system, assistant]")
+            self._scan[agent] = frozenset(extra)
         self._tools: dict[tuple[str, str], dict] = {}
         for agent, a in (cfg.get("agents") or {}).items():
             for tool, spec in ((a or {}).get("tools") or {}).items():
@@ -71,6 +76,10 @@ class PolicyEngine:
     def blocks_non_text(self, agent: str) -> bool:
         """True when the agent's policy forbids images/audio/documents on the model proxy."""
         return self._non_text.get(agent, "allow") == "block"
+
+    def scan_extra(self, agent: str) -> frozenset:
+        """Opt-in extra model-proxy inbound scans for this agent: any of {"system", "assistant"}."""
+        return self._scan.get(agent, frozenset())
 
     @property
     def agent_names(self) -> set[str]:

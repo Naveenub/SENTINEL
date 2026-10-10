@@ -56,10 +56,17 @@ class OpenAIFormat:
     def upstream_headers(self, api_key: str, version: str) -> dict:
         return {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
-    def inbound(self, body: dict) -> list[Span]:
+    def inbound(self, body: dict, extra: frozenset = frozenset()) -> list[Span]:
         out = []
         for m in body["messages"]:
             role = m.get("role")
+            kind = "system" if role in ("system", "developer") else role
+            if kind in extra:  # opt-in (agents.yaml `scan`): scanned, never rewritten
+                # system is developer-set (user tolerance); replayed assistant turns are external (stricter)
+                src = "user" if kind == "system" else "external"
+                for setter, text in _text_parts(m.get("content"), lambda v, m=m: m.__setitem__("content", v)):
+                    out.append(Span(src, f"model-proxy:{kind}", text, setter))
+                continue
             src = {"user": "user", "tool": "external", "function": "external"}.get(role)
             if not src:
                 continue
@@ -153,8 +160,8 @@ class OpenAIFormat:
 
 
 class AnthropicFormat:
-    """Anthropic Messages API. `system` is trusted (developer-set) and not scanned; tool_result blocks
-    are external data; assistant turns are skipped; image/document blocks are not scanned (block them per agent with non_text: block)."""
+    """Anthropic Messages API. `system` is trusted (developer-set) and not scanned unless the agent opts in with `scan: [system]`; tool_result blocks
+    are external data; assistant turns are skipped unless the agent opts in with `scan: [assistant]` (text blocks only); image/document blocks are not scanned (block them per agent with non_text: block)."""
     name = "anthropic"
     path = "/messages"
     DEFAULT_VERSION = "2023-06-01"
@@ -167,9 +174,16 @@ class AnthropicFormat:
         # the agent's own x-api-key and anthropic-beta are never forwarded
         return {"anthropic-version": version or self.DEFAULT_VERSION, **({"x-api-key": api_key} if api_key else {})}
 
-    def inbound(self, body: dict) -> list[Span]:
+    def inbound(self, body: dict, extra: frozenset = frozenset()) -> list[Span]:
         out = []
+        if "system" in extra:  # opt-in: top-level system prompt (str or text blocks); developer-set, user tolerance
+            for setter, text in _text_parts(body.get("system"), lambda v: body.__setitem__("system", v)):
+                out.append(Span("user", "model-proxy:system", text, setter))
         for m in body["messages"]:
+            if m.get("role") == "assistant" and "assistant" in extra:  # replayed history: external tolerance
+                for setter, text in _text_parts(m.get("content"), lambda v, m=m: m.__setitem__("content", v)):
+                    out.append(Span("external", "model-proxy:assistant", text, setter))
+                continue
             if m.get("role") != "user":
                 continue
             c = m.get("content")
