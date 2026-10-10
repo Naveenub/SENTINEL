@@ -25,6 +25,38 @@ def _text_parts(content, put_str):
                 yield (lambda v, p=part: p.__setitem__("text", v)), part["text"]
 
 
+def _leaves(obj):
+    """(setter, text) for every string value in nested dicts/lists (tool-call inputs)."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, str):
+                yield (lambda x, o=obj, k=k: o.__setitem__(k, x)), v
+            else:
+                yield from _leaves(v)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            if isinstance(v, str):
+                yield (lambda x, o=obj, i=i: o.__setitem__(i, x)), v
+            else:
+                yield from _leaves(v)
+
+
+def _call_args(raw):
+    """Decoded string leaves of a JSON-encoded arguments string (so escapes cannot hide text); raw string if not JSON."""
+    if not isinstance(raw, str) or not raw:
+        return
+    try:
+        obj = json.loads(raw)
+    except ValueError:
+        yield (lambda v: None), raw
+        return
+    if isinstance(obj, str):
+        yield (lambda v: None), obj
+    else:
+        for _, text in _leaves(obj):
+            yield (lambda v: None), text
+
+
 def _kinds(content, text_types=("text",)):
     """Types of non-text parts in a content value (a plain str has none)."""
     if not isinstance(content, list):
@@ -66,6 +98,13 @@ class OpenAIFormat:
                 src = "user" if kind == "system" else "external"
                 for setter, text in _text_parts(m.get("content"), lambda v, m=m: m.__setitem__("content", v)):
                     out.append(Span(src, f"model-proxy:{kind}", text, setter))
+                if kind == "assistant":  # replayed tool-call arguments (JSON strings) and legacy function_call
+                    calls = [(tc or {}).get("function") or {} for tc in m.get("tool_calls") or []]
+                    if isinstance(m.get("function_call"), dict):
+                        calls.append(m["function_call"])
+                    for fn in calls:
+                        for setter, text in _call_args(fn.get("arguments") if isinstance(fn, dict) else None):
+                            out.append(Span(src, "model-proxy:assistant", text, setter))
                 continue
             src = {"user": "user", "tool": "external", "function": "external"}.get(role)
             if not src:
@@ -161,7 +200,7 @@ class OpenAIFormat:
 
 class AnthropicFormat:
     """Anthropic Messages API. `system` is trusted (developer-set) and not scanned unless the agent opts in with `scan: [system]`; tool_result blocks
-    are external data; assistant turns are skipped unless the agent opts in with `scan: [assistant]` (text blocks only); image/document blocks are not scanned (block them per agent with non_text: block)."""
+    are external data; assistant turns are skipped unless the agent opts in with `scan: [assistant]` (text, tool_use inputs, thinking); image/document blocks are not scanned (block them per agent with non_text: block)."""
     name = "anthropic"
     path = "/messages"
     DEFAULT_VERSION = "2023-06-01"
@@ -183,6 +222,15 @@ class AnthropicFormat:
             if m.get("role") == "assistant" and "assistant" in extra:  # replayed history: external tolerance
                 for setter, text in _text_parts(m.get("content"), lambda v, m=m: m.__setitem__("content", v)):
                     out.append(Span("external", "model-proxy:assistant", text, setter))
+                for blk in (m.get("content") if isinstance(m.get("content"), list) else []):
+                    if not isinstance(blk, dict):
+                        continue
+                    if blk.get("type") in ("tool_use", "server_tool_use"):  # replayed tool inputs
+                        for setter, text in _leaves(blk.get("input")):
+                            out.append(Span("external", "model-proxy:assistant", text, setter))
+                    elif blk.get("type") == "thinking" and isinstance(blk.get("thinking"), str):
+                        out.append(Span("external", "model-proxy:assistant", blk["thinking"],
+                                        lambda v, b=blk: b.__setitem__("thinking", v)))
                 continue
             if m.get("role") != "user":
                 continue

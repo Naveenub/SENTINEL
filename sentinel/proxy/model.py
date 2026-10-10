@@ -16,7 +16,7 @@ Blocks and upstream errors on a stream request are returned as ordinary JSON err
 providers themselves do for failures before the first event.
 Not scanned: non-text content (images, audio, documents), system prompt, assistant history, reasoning.
 Opt-in per agent (agents.yaml `scan: [system, assistant]`): scan the system prompt (user tolerance) and replayed
-assistant turns (external tolerance, text blocks only). They are scanned but never rewritten or wrapped.
+assistant turns (external tolerance: text, tool-call arguments/inputs, thinking). They are scanned but never rewritten or wrapped.
 Per-agent `non_text: block` in agents.yaml rejects any request carrying non-text content (403 non_text_blocked).
 One upstream serves both formats only if it speaks both (e.g. LiteLLM); otherwise use the one you run.
 """
