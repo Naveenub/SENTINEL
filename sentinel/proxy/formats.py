@@ -26,9 +26,12 @@ def _text_parts(content, put_str):
 
 
 def _leaves(obj):
-    """(setter, text) for every string value in nested dicts/lists (tool-call inputs)."""
+    """(setter, text) for every string value and object key in nested dicts/lists (tool-call inputs).
+    Key setters are no-ops: keys are scanned, never rewritten."""
     if isinstance(obj, dict):
         for k, v in obj.items():
+            if isinstance(k, str):
+                yield (lambda x: None), k
             if isinstance(v, str):
                 yield (lambda x, o=obj, k=k: o.__setitem__(k, x)), v
             else:
