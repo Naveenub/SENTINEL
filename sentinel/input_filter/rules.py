@@ -1,4 +1,5 @@
 import base64
+import codecs
 import binascii
 import re
 import unicodedata
@@ -9,6 +10,12 @@ RULES: list[tuple[str, int, re.Pattern]] = [
     ("dismiss_prior_context", 3, re.compile(r"\b(?:pay\s+no\s+(?:attention|heed)\s+to|ignore|disregard|forget|set\s+aside|throw\s+away)\b.{0,25}\b(?:everything|anything|whatever|what)\b.{0,40}\b(?:told|said|instructed|given|came\s+before|above|earlier|before|previously)\b", _F)),
     ("dismiss_prior_context", 3, re.compile(r"\bpay\s+no\s+(?:attention|heed)\s+to\b.{0,40}\b(?:previous|prior|above|earlier|instructions?|rules?)\b", _F)),
     ("override_instructions_es", 3, re.compile(r"\b(?:ignora|ignore|olvida|descarta|omite|desatiende)\w*\b.{0,40}\b(?:instrucciones|reglas|indicaciones|directrices)\b", _F)),
+    ("override_paraphrase", 3, re.compile(r"\b(?:ignore|disregard|forget|override|discard|dismiss|abandon|drop|bypass|stop\s+following|(?:do\s+not|don'?t)\s+follow|(?:do\s+not|don'?t)\s+obey)\b.{0,70}\b(?:instructions?|guidance|directions?|directives?|rules|prompts?|guidelines?|orders|commands|constraints|briefing)\b.{0,70}\b(?:previous|prior|earlier|before|above|received|given|so\s+far|until\s+now|original|initial|preceding|were\s+told)\b|\b(?:ignore|disregard|forget|override|discard|dismiss|abandon|drop|bypass|stop\s+following|(?:do\s+not|don'?t)\s+follow|(?:do\s+not|don'?t)\s+obey)\b.{0,70}\b(?:previous|prior|earlier|before|above|received|given|so\s+far|until\s+now|original|initial|preceding|were\s+told)\b.{0,50}\b(?:instructions?|guidance|directions?|directives?|rules|prompts?|guidelines?|orders|commands|constraints|briefing)\b", _F)),
+    ("override_paraphrase", 3, re.compile(r"\b(?:set|put|push|move|leave|lay)\b.{0,40}\b(?:instructions?|guidance|directions?|directives?|rules|prompts?|guidelines?|orders|commands|constraints|briefing)\b.{0,60}\b(?:previous|prior|earlier|before|above|received|given|so\s+far|until\s+now|original|initial|preceding|were\s+told)\b.{0,40}\b(?:aside|to\s+one\s+side|behind)\b", _F)),
+    ("override_instructions_fr", 3, re.compile(r"\b(?:ignor\w+|oubli\w+|néglig\w+|fais?\s+abstraction\s+d\w*)\b.{0,40}\b(?:instructions|consignes|règles|directives)\b", _F)),
+    ("reveal_system_prompt_fr", 2, re.compile(r"\b(?:révél\w+|affich\w+|montr\w+|répèt\w+|donn\w+)\b.{0,30}\b(?:prompt|invite|message|instructions)\s+syst[èe]me\b", _F)),
+    ("override_instructions_de", 3, re.compile(r"\b(?:vergiss(?!\s+nicht)\w*|ignorier\w*|missachte\w*|übergehe\w*|verwirf\w*)\b.{0,40}\b(?:anweisungen|instruktionen|regeln|vorgaben|richtlinien)\b", _F)),
+    ("reveal_system_prompt_de", 2, re.compile(r"\b(?:gib|zeig\w*|nenn\w*|verrat\w*|wiederhole\w*|druck\w*)\b.{0,30}\b(?:system[-\s]?prompt|systemanweisung\w*)", _F)),
     ("reveal_system_prompt_es", 2, re.compile(r"\b(?:revela|muestra|imprime|repite|escribe)\w*\b.{0,30}\b(?:prompt|instrucciones|mensaje)\s+del\s+sistema\b", _F)),
     ("reveal_system_prompt", 2, re.compile(r"\b(reveal|show|print|repeat|output)\b.{0,30}\b(system|hidden|initial)\s+(prompt|instructions?|message)", _F)),
     ("role_hijack", 2, re.compile(r"\byou are now\b|\bact as (?:dan|an? unrestricted)\b|\bdeveloper mode\b|\bjailbreak\b", re.I)),
@@ -84,6 +91,9 @@ def scan_text(text: str) -> list[tuple[str, int]]:
     hits = _match(norm)
     # base64 blobs that decode to readable text are scanned too; a hit inside one is a high-severity finding
     if any(_match(unicodedata.normalize("NFKC", b)) for b in _decoded_blobs(norm)):
+        hits["encoded_payload"] = 3
+    # ROT13 is a classic cheap obfuscation; a hit only in the decoded text is a high-severity finding
+    if _match(codecs.decode(norm, "rot13")):
         hits["encoded_payload"] = 3
     out = list(hits.items())
     # zero-width/bidi chars and Unicode "tag" characters are used to smuggle instructions
