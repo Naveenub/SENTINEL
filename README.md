@@ -443,6 +443,45 @@ Anthropic(base_url="http://127.0.0.1:8080/proxy/research-bot", api_key=AGENT_TOK
 - **Lockout.** After `SENTINEL_AUTH_MAX_FAILURES` (default 10) invalid tokens from one client address within `SENTINEL_AUTH_FAILURE_WINDOW` seconds (60), that client gets `429` with `Retry-After` for `SENTINEL_AUTH_LOCKOUT_SECONDS` (300), even with a valid token. Missing tokens and a valid token used for the wrong agent (403) do not count. It is keyed by client address, not agent, so guessing an agent's name cannot lock that agent out. Behind a reverse proxy all callers share the proxy's address, so rate-limit per client at the proxy too. State is in memory and resets on restart.
 - **Not provided: TLS.** Startup warns when auth is on and the bind is non-loopback. Tokens are bearer secrets, so use localhost, a TLS-terminating proxy or a private network (`uvicorn` can also terminate TLS itself with `--ssl-keyfile` and `--ssl-certfile`).
 
+### 16. Deploying with TLS
+
+SENTINEL does not terminate TLS itself. Anything beyond localhost needs TLS from one of the options below, plus agent auth (section 15). Without both, tokens and prompts cross the network in cleartext.
+
+**Option A: uvicorn terminates TLS.** Smallest change, fine for a single host.
+
+```bash
+export SENTINEL_AGENT_TOKENS="research-bot=$(openssl rand -hex 24)"
+export SENTINEL_ACK_NONLOOPBACK=1        # only after TLS + auth are in place
+uvicorn --factory sentinel.main:create_app --host 0.0.0.0 --port 8443 \
+  --ssl-keyfile /etc/sentinel/key.pem --ssl-certfile /etc/sentinel/cert.pem
+```
+
+Checked with a self-signed certificate on loopback: `https://` answered and plain `http://` against the same port was refused. Not checked on a real network or with a CA-issued certificate.
+
+- The startup warning only looks at the bind address, not at TLS flags, so it keeps firing on a non-loopback bind until `SENTINEL_ACK_NONLOOPBACK=1` is set.
+- Uvicorn reads the certificate files at startup. Renewing a certificate means restarting the gateway. Approvals, revocations and the audit log live in SQLite and survive that; rate-limit counters and auth lockout state do not.
+- The gateway sees real client addresses, so lockout and `auth_failure_spike` work per client.
+
+**Option B: TLS-terminating reverse proxy.** Keep SENTINEL on `127.0.0.1:8080` and let the proxy hold the certificate and renew it. A minimal Caddy config (not tested here):
+
+```
+sentinel.example.com {
+    reverse_proxy 127.0.0.1:8080 {
+        transport http { response_header_timeout 330s }
+    }
+}
+```
+
+- Set the proxy's read or response timeout above `SENTINEL_UPSTREAM_TIMEOUT` (default 300s). SENTINEL holds the whole model reply until it is scanned, including for `stream=true`, so a short proxy timeout cuts off slow generations.
+- Every caller then appears to come from the proxy's address, so SENTINEL's lockout and `auth_failure_spike` treat all clients as one. Rate-limit per client at the proxy too.
+- Do not publish port 8080 itself; bind SENTINEL to loopback or a private interface so the proxy is the only way in.
+
+**Option C: private network or service mesh** (WireGuard, mesh mTLS) when everything stays inside one trust boundary.
+
+**Clients must verify the certificate.** Point them at your CA bundle, for example `httpx.Client(verify="/path/ca.pem")` or `SSL_CERT_FILE`, and do not disable verification. Set `base_url` to the `https://` address, including for the OpenAI and Anthropic SDKs (section 14).
+
+**Health checks.** `/healthz` needs a valid agent or admin token (section 15), so probes that cannot send headers cannot use it. Probe through a client that can send `X-Sentinel-Admin-Token`.
+
 ---
 
 ## Integrations and standards
