@@ -478,6 +478,30 @@ sentinel.example.com {
 
 **Option C: private network or service mesh** (WireGuard, mesh mTLS) when everything stays inside one trust boundary.
 
+**Per-client limits at the proxy.** SENTINEL's rate limits (per agent and tool) and its auth lockout (per client address) live in process memory and reset on restart, and each worker or replica counts separately. Behind a proxy the lockout also sees one address for everyone. Put the durable, per-client limits in the proxy instead. A minimal nginx sketch (not tested here):
+
+```nginx
+limit_req_zone  $binary_remote_addr zone=sentinel_req:10m rate=20r/s;
+limit_conn_zone $binary_remote_addr zone=sentinel_conn:10m;
+
+server {
+    listen 443 ssl;
+    server_name sentinel.example.com;
+    # ssl_certificate / ssl_certificate_key ...
+    location / {
+        limit_req  zone=sentinel_req burst=40 nodelay;
+        limit_conn sentinel_conn 20;
+        limit_req_status 429;
+        proxy_read_timeout 330s;               # above SENTINEL_UPSTREAM_TIMEOUT
+        proxy_pass http://127.0.0.1:8080;
+    }
+}
+```
+
+- This caps request volume per client address. It does not replace the per-tool limits in `policies/agents.yaml`, which stay in memory, so a restart still resets those counters.
+- Caddy has no built-in rate limiter; it needs a plugin such as `caddy-ratelimit`.
+- A proxy cannot tell failed authentications from good ones unless you add rules for 401 responses (for example fail2ban on the proxy log). SENTINEL's own lockout still applies, but per proxy address.
+
 **Clients must verify the certificate.** Point them at your CA bundle, for example `httpx.Client(verify="/path/ca.pem")` or `SSL_CERT_FILE`, and do not disable verification. Set `base_url` to the `https://` address, including for the OpenAI and Anthropic SDKs (section 14).
 
 **Health checks.** `/healthz` needs a valid agent or admin token (section 15), so probes that cannot send headers cannot use it. Probe through a client that can send `X-Sentinel-Admin-Token`.
