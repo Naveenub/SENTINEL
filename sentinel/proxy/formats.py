@@ -117,6 +117,9 @@ class OpenAIFormat:
                 out.append(Span(src, ref, text, setter, wrap=src == "external"))
         return out
 
+    def strip_redacted(self, body: dict) -> int:
+        return 0  # no such block in this format
+
     def non_text(self, body: dict) -> list[str]:
         """Non-text part types in scanned roles (user, tool, function), e.g. image_url, input_audio, file."""
         out: list[str] = []
@@ -246,6 +249,22 @@ class AnthropicFormat:
                     for setter, text in _text_parts(blk.get("content"), lambda v, b=blk: b.__setitem__("content", v)):
                         out.append(Span("external", ref, text, setter, wrap=True))
         return out
+
+    def strip_redacted(self, body: dict) -> int:
+        """Remove opaque redacted_thinking blocks from assistant history (in place); returns how many.
+        An assistant turn left with no content is dropped. Breaks tool loops that must echo them back."""
+        n, keep = 0, []
+        for m in body["messages"]:
+            c = m.get("content")
+            if m.get("role") == "assistant" and isinstance(c, list):
+                kept = [b for b in c if not (isinstance(b, dict) and b.get("type") == "redacted_thinking")]
+                n += len(c) - len(kept)
+                if not kept:
+                    continue
+                m["content"] = kept
+            keep.append(m)
+        body["messages"] = keep
+        return n
 
     def non_text(self, body: dict) -> list[str]:
         """Non-text block types in user turns, including inside tool_result content (image, document, ...)."""

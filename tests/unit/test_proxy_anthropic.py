@@ -287,3 +287,40 @@ def test_clean_tool_use_and_thinking_forwarded_untouched(make, tmp_path, monkeyp
         {"role": "user", "content": "hi"}, {"role": "assistant", "content": [dict(b) for b in hist]},
         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}]})
     assert r.status_code == 200 and c.up.seen[0][2]["messages"][1]["content"] == hist
+
+
+def _rt_history():
+    return [{"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [{"type": "redacted_thinking", "data": "ENC"},
+                                              {"type": "text", "text": "a"}]},
+            {"role": "user", "content": "x"},
+            {"role": "assistant", "content": [{"type": "redacted_thinking", "data": "ENC"}]},
+            {"role": "user", "content": "y"}]
+
+
+def test_redacted_thinking_forwarded_by_default(make):
+    c = make(Upstream())
+    assert c.post(BASE, json={"model": "m", "max_tokens": 8, "messages": _rt_history()}).status_code == 200
+    assert c.up.seen[0][2]["messages"] == _rt_history()
+
+
+def test_redacted_thinking_stripped_when_configured(make, tmp_path, monkeypatch):
+    import yaml
+    cfg = yaml.safe_load(open(POLICY))
+    cfg["agents"]["research-bot"]["redacted_thinking"] = "strip"
+    p = tmp_path / "p.yaml"
+    p.write_text(yaml.safe_dump(cfg))
+    monkeypatch.setenv("SENTINEL_POLICY", str(p))
+    c = make(Upstream())
+    assert c.post(BASE, json={"model": "m", "max_tokens": 8, "messages": _rt_history()}).status_code == 200
+    sent = c.up.seen[0][2]["messages"]
+    assert sent[1]["content"] == [{"type": "text", "text": "a"}]
+    assert [m["content"] for m in sent if m["role"] == "user"] == ["hi", "x", "y"] and len(sent) == 4
+
+
+def test_bad_redacted_thinking_value_fails_at_load(tmp_path):
+    from sentinel.policy.engine import PolicyEngine
+    p = tmp_path / "a.yaml"
+    p.write_text("agents:\n  a:\n    redacted_thinking: drop\n    tools: {}\n")
+    with pytest.raises(ValueError):
+        PolicyEngine(str(p))

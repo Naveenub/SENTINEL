@@ -35,11 +35,16 @@ class PolicyEngine:
         self._agents = set((cfg.get("agents") or {}).keys())
         self._non_text: dict[str, str] = {}
         self._scan: dict[str, frozenset] = {}
+        self._strip_rt: dict[str, bool] = {}
         for agent, a in (cfg.get("agents") or {}).items():
             mode = (a or {}).get("non_text", "allow")
             if mode not in ("allow", "block"):  # fail closed at load
                 raise ValueError(f"{agent}: non_text must be allow or block")
             self._non_text[agent] = mode
+            rt = (a or {}).get("redacted_thinking", "forward")
+            if rt not in ("forward", "strip"):  # fail closed at load
+                raise ValueError(f"{agent}: redacted_thinking must be forward or strip")
+            self._strip_rt[agent] = rt == "strip"
             extra = (a or {}).get("scan") or []
             if not isinstance(extra, list) or not set(extra) <= {"system", "assistant"}:
                 raise ValueError(f"{agent}: scan must be a list drawn from [system, assistant]")
@@ -76,6 +81,10 @@ class PolicyEngine:
     def blocks_non_text(self, agent: str) -> bool:
         """True when the agent's policy forbids images/audio/documents on the model proxy."""
         return self._non_text.get(agent, "allow") == "block"
+
+    def strips_redacted_thinking(self, agent: str) -> bool:
+        """True when the agent's policy removes opaque redacted_thinking blocks from replayed history."""
+        return self._strip_rt.get(agent, False)
 
     def scan_extra(self, agent: str) -> frozenset:
         """Opt-in extra model-proxy inbound scans for this agent: any of {"system", "assistant"}."""
