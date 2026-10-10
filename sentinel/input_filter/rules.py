@@ -15,6 +15,8 @@ RULES: list[tuple[str, int, re.Pattern]] = [
     ("override_instructions_fr", 3, re.compile(r"\b(?:ignor\w+|oubli\w+|néglig\w+|fais?\s+abstraction\s+d\w*)\b.{0,40}\b(?:instructions|consignes|règles|directives)\b", _F)),
     ("reveal_system_prompt_fr", 2, re.compile(r"\b(?:révél\w+|affich\w+|montr\w+|répèt\w+|donn\w+)\b.{0,30}\b(?:prompt|invite|message|instructions)\s+syst[èe]me\b", _F)),
     ("override_instructions_de", 3, re.compile(r"\b(?:vergiss(?!\s+nicht)\w*|ignorier\w*|missachte\w*|übergehe\w*|verwirf\w*)\b.{0,40}\b(?:anweisungen|instruktionen|regeln|vorgaben|richtlinien)\b", _F)),
+    ("override_instructions_it", 3, re.compile(r"\b(?:ignor\w+|dimentic\w+|trascur\w+|scart\w+|disattend\w+|non\s+(?:tenere|tenete|tener)\s+conto\s+d\w*)\b.{0,40}\b(?:istruzioni|regole|direttive|indicazioni|linee\s+guida)\b", _F)),
+    ("override_instructions_ru", 3, re.compile(r"\b(?:игнорир\w+|забуд\w+|забыть|пренебр\w+|отбрось\w*|отмени\w*|не\s+обращай\w*\s+внимания\s+на)\b.{0,40}\b(?:инструкци\w+|правил\w*|указани\w+|директив\w+)", _F)),
     ("reveal_system_prompt_de", 2, re.compile(r"\b(?:gib|zeig\w*|nenn\w*|verrat\w*|wiederhole\w*|druck\w*)\b.{0,30}\b(?:system[-\s]?prompt|systemanweisung\w*)", _F)),
     ("reveal_system_prompt_es", 2, re.compile(r"\b(?:revela|muestra|imprime|repite|escribe)\w*\b.{0,30}\b(?:prompt|instrucciones|mensaje)\s+del\s+sistema\b", _F)),
     ("reveal_system_prompt", 2, re.compile(r"\b(reveal|show|print|repeat|output)\b.{0,30}\b(system|hidden|initial)\s+(prompt|instructions?|message)", _F)),
@@ -43,6 +45,7 @@ _HOMOGLYPHS = str.maketrans({
 })
 _LEET = str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "@": "a", "$": "s"})
 _LEET_TOKEN = re.compile(r"[\w@$]+")
+_HEX = re.compile(r"(?<![0-9A-Za-z])(?:[0-9a-fA-F]{2}){16,}(?![0-9A-Za-z])")
 _B64 = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{16,}={0,2}(?![A-Za-z0-9+/=])")
 
 
@@ -74,6 +77,14 @@ def _decoded_blobs(text: str) -> list[str]:
             continue
         if len(s) >= 8 and sum(c.isprintable() or c in "\n\t" for c in s) / len(s) >= 0.95:
             blobs.append(s)
+    # long even-length hex runs; hashes and ids decode to non-printable bytes and are dropped by the same check
+    for m in _HEX.finditer(text):
+        try:
+            s = bytes.fromhex(m.group(0)).decode("utf-8")
+        except ValueError:
+            continue
+        if len(s) >= 8 and sum(c.isprintable() or c in "\n\t" for c in s) / len(s) >= 0.95:
+            blobs.append(s)
     return blobs
 
 
@@ -93,7 +104,8 @@ def scan_text(text: str) -> list[tuple[str, int]]:
     if any(_match(unicodedata.normalize("NFKC", b)) for b in _decoded_blobs(norm)):
         hits["encoded_payload"] = 3
     # ROT13 is a classic cheap obfuscation; a hit only in the decoded text is a high-severity finding
-    if _match(codecs.decode(norm, "rot13")):
+    # (rot13 leaves non-ASCII untouched, so ignore rules that already matched the plain text, e.g. Cyrillic)
+    if set(_match(codecs.decode(norm, "rot13"))) - set(hits):
         hits["encoded_payload"] = 3
     out = list(hits.items())
     # zero-width/bidi chars and Unicode "tag" characters are used to smuggle instructions
