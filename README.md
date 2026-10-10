@@ -15,7 +15,7 @@ A defense gateway that sits between **untrusted input**, the **model**, and **to
 > [!WARNING]
 > **Do not expose SENTINEL beyond localhost without agent auth *and* TLS.** With auth off (the default) every agent-facing endpoint trusts any caller that can reach the port. With auth on, tokens are bearer secrets sent in cleartext unless you terminate TLS. On startup SENTINEL logs a boxed warning if it detects a non-loopback bind (`--host 0.0.0.0` etc.); see section 15.
 
-> **Status:** all five layers are built and tested: 170 tests (171 with the `opa` binary on PATH) plus a red-team corpus (11 documented detection gaps tracked as strict expected-failures). promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
+> **Status:** all five layers are built and tested: 183 unit tests (184 with the `opa` binary on PATH) plus a 57-case red-team corpus (32 attacks, 25 benign). The corpus has no open detection gaps; 2 known rule-layer false positives are tracked as strict expected-failures. promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
 >
 > **ML classifier backends (NVIDIA JailbreakDetect NIM, Meta Prompt Guard 2) are implemented but not measured against real models.** I could not download models or reach an NIM from the build environment. The NIM client is tested against a local server implementing NVIDIA's documented API, and Prompt Guard against a stand-in pipeline. Run `scripts/eval_classifier.py` on your machine to get real numbers before relying on either.
 >
@@ -93,9 +93,11 @@ sentinel/
 ├── sentinel/
 │   ├── main.py                    # FastAPI app factory + endpoints, admin-token guard
 │   ├── models.py                  # pydantic request/response types
+│   ├── netwarn.py                 # startup warning when the bind address is non-loopback
 │   ├── pipeline.py                # ties L1 + L2 together, writes every decision to L5
 │   ├── input_filter/              # L1
-│   │   ├── rules.py               # injection regexes + hidden-unicode detection
+│   │   ├── rules.py               # injection regexes (EN/ES/FR/DE/IT/RU), homoglyph + leetspeak folding,
+│   │   │                          #   base64/hex/ROT13 decoding, hidden-unicode detection
 │   │   ├── tagger.py              # wraps external content as <untrusted> data
 │   │   ├── classifier.py          # backend loader + ensemble (SENTINEL_CLASSIFIER)
 │   │   └── backends/
@@ -117,7 +119,8 @@ sentinel/
 │   │   └── scanner.py             # output scan: credentials withheld, PII/exfil redacted
 │   ├── proxy/
 │   │   ├── model.py               # model proxy core: scan in, scan out, preflight tool calls, audit
-│   │   └── formats.py             # wire formats: OpenAI chat-completions, Anthropic Messages
+│   │   ├── formats.py             # wire formats: OpenAI chat-completions, Anthropic Messages
+│   │   └── openai.py              # earlier OpenAI-only proxy; not imported anywhere, superseded by model.py
 │   └── audit/                     # L5
 │       ├── log.py                 # hash-chained, HMAC-signed, append-only SQLite log
 │       ├── detect.py              # anomaly rules: spikes, new domains, unusual sequences, ...
@@ -130,11 +133,13 @@ sentinel/
 │   ├── approve.py                 # CLI: list / approve / deny pending actions
 │   ├── eval_classifier.py         # measure rules + classifier on the red-team corpus
 │   ├── garak_scan.sh              # garak against the model directly vs through SENTINEL
-│   └── verify_log.py              # CLI: verify audit chain offline
+│   ├── verify_log.py              # CLI: verify audit chain offline
+│   └── verify_thinking_loop.py    # live check: extended-thinking tool loop + redacted_thinking: strip (needs a real Anthropic upstream)
 ├── tests/
-│   ├── unit/                      # test_core.py, test_l3_l4.py, test_l5.py, test_classifier.py
+│   ├── unit/                      # test_core, test_l3_l4, test_l5, test_classifier, test_opa, test_approvals,
+│   │                              # test_revocation, test_agent_auth, test_netwarn, test_proxy, test_proxy_anthropic, test_proxy_stream
 │   └── redteam/
-│       ├── cases/injection.yaml   # attacks, benign text, known gaps, known false positives
+│       ├── cases/injection.yaml   # attacks, benign text, known gaps (currently empty), known false positives
 │       ├── test_injection_corpus.py
 │       └── promptfooconfig.yaml   # same attacks through the live gateway via promptfoo
 └── .github/workflows/ci.yml       # pytest, then gateway + promptfoo
@@ -145,6 +150,8 @@ sentinel/
 ## How to use
 
 ### 1. Install
+
+Requires Python 3.10+.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -198,6 +205,25 @@ d = httpx.post(f"{G}/v1/tool/authorize", json={"agent": "research-bot", "tool": 
 
 Tell your model in its system prompt that text inside `<untrusted>` is data and never instructions.
 
+**Endpoint reference**
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `POST /v1/scan` | agent token (if auth on) | L1 scan of items before they reach the model |
+| `POST /v1/tool/authorize` | agent token | L2 decision: `allow`, `deny` or `pending` |
+| `POST /v1/tool/run` | agent token | authorize, sandbox, scan output, audit (sections 5, 13) |
+| `POST /v1/chat/completions`, `POST /v1/messages` | agent token | model proxy on the gateway root, agent from `X-Sentinel-Agent` or the token (section 14) |
+| `POST /proxy/{agent}/v1/chat/completions`, `POST /proxy/{agent}/v1/messages` | agent token | model proxy with the agent in the path |
+| `GET /healthz` | any agent token or admin token | liveness, returns `{"ok": true}` |
+| `GET /v1/status` | admin | active classifier, fail mode, policy backend, whether the model proxy is mounted |
+| `GET /v1/approvals`, `POST /v1/approvals/{id}/approve`, `POST /v1/approvals/{id}/deny` | admin | human approval queue (section 6) |
+| `GET /v1/alerts` | admin | recent alerts (section 10) |
+| `GET /v1/audit/verify` | admin | verify the audit chain (section 7) |
+| `POST /v1/tokens/{jti}/revoke`, `POST /v1/agents/{agent}/revoke-tokens` | admin | token revocation (section 13) |
+| `POST /v1/token/verify` | verifier token | services check a token and scope, including revocation (section 13) |
+
+The model proxy routes exist only when `SENTINEL_UPSTREAM_URL` is set. "Admin" means the `X-Sentinel-Admin-Token` header; "verifier" means `X-Sentinel-Verifier-Token`.
+
 ### 5. Let SENTINEL run the tool (L3 + L4)
 
 For tools with a `sandbox:` block in `policies/agents.yaml`, call `/v1/tool/run`. SENTINEL authorizes, mints a short-lived scoped token (if the tool lists `secrets`), runs the tool in a container, scans the output, audits everything, and returns the output already wrapped as `<untrusted>`.
@@ -240,14 +266,14 @@ Approvals are **persisted in SQLite** (`SENTINEL_APPROVAL_DB`, default the audit
 
 ```bash
 export SENTINEL_ADMIN_TOKEN=...
-python scripts/approve.py list
+python scripts/approve.py list               # SENTINEL_URL overrides the default http://127.0.0.1:8080
 python scripts/approve.py approve <approval_id>     # or: deny
 ```
 
 ### 7. Verify the audit log
 
 ```bash
-python scripts/verify_log.py          # prints OK or TAMPERED at entry id N
+python scripts/verify_log.py          # prints OK or TAMPERED at entry id N (optional arg: path to the audit DB; needs SENTINEL_AUDIT_KEY)
 curl -H "X-Sentinel-Admin-Token: $SENTINEL_ADMIN_TOKEN" http://127.0.0.1:8080/v1/audit/verify
 ```
 
@@ -255,7 +281,7 @@ Prompts are logged as SHA-256 + length by default. Set `SENTINEL_LOG_CONTENT=1` 
 
 ### 8. ML classifier backends (L1)
 
-Rules catch the obvious attacks; they miss paraphrase, encodings, other languages and homoglyphs (see the red-team corpus). Add a model with `SENTINEL_CLASSIFIER`:
+The rules are pattern-based. They cover English, Spanish, French, German, Italian and Russian override phrasings, a set of paraphrase and persona patterns, homoglyph and leetspeak folding, and base64, hex and ROT13 payloads, all exercised by the red-team corpus. Anything outside those patterns (novel paraphrase, other languages, other encodings) will get through, so add a model with `SENTINEL_CLASSIFIER`:
 
 | Backend | What it is | Runs | Needs |
 |---|---|---|---|
@@ -286,6 +312,8 @@ Behaviour you should know:
 pytest
 ```
 
+The `opa`-backed integration test in `tests/unit/test_opa.py` is skipped when the `opa` binary is not on PATH, and the empty `known_gaps` list shows up as one skipped parametrized test.
+
 ### 10. Alerts (L5)
 
 Every audit event is watched. Alerts are written back into the signed log as `alert` entries, logged, and optionally POSTed to a webhook (`SENTINEL_ALERT_WEBHOOK`).
@@ -298,6 +326,9 @@ Every audit event is watched. Alerts are written back into the signed log as `al
 | `output_withheld` | a tool's output was withheld (credentials or injection in output) |
 | `new_domain` | first request to a host, after the agent's learning period |
 | `unusual_sequence` | a tool-to-tool transition never seen before, after the learning period |
+| `auth_failure_spike` | many failed agent-auth attempts from one client address (`SENTINEL_AUTH_ALERT_LIMIT`, section 15) |
+| `classifier_degraded` | the ML classifier errored or timed out, so screening fell back to a block or to rules only (section 8) |
+| `policy_backend_degraded` | OPA returned an error or undefined result (section 12) |
 
 ```bash
 curl -H "X-Sentinel-Admin-Token: $SENTINEL_ADMIN_TOKEN" http://127.0.0.1:8080/v1/alerts
@@ -313,7 +344,7 @@ For tools that fetch URLs, add `allowed_hosts` in `policies/agents.yaml` (see `f
 pytest tests/redteam -rfEX            # corpus: attacks, benign text, known gaps
 ```
 
-Current results on the bundled corpus (written by the same author as the rules, so treat it as a regression suite, not an independent benchmark): 16/16 attacks blocked, 10/10 benign allowed, **9 evasions undetected** (paraphrase, base64, Spanish, leetspeak, Cyrillic homoglyph, indirect task hijack, persona reset, authority claim) and **2 false positives** (a log line starting with `System:`, and a sentence about ignoring README instructions). Gaps are strict expected-failures: when you fix one, the suite fails until you move it to `attacks`.
+Current results on the bundled corpus (written by the same author as the rules, so treat it as a regression suite, not an independent benchmark): 32/32 attacks blocked, 25/25 benign allowed, **0 known detection gaps** (`known_gaps` is empty) and **2 known false positives** (a log line starting with `System:`, and a sentence about ignoring README instructions). Attacks cover English overrides and paraphrase, Spanish, French, German, Italian and Russian, base64, hex and ROT13, leetspeak, Cyrillic homoglyphs, fullwidth and zero-width characters, hidden tag characters, persona resets, authority claims and exfiltration instructions. Gaps and false positives are strict expected-failures: when you fix one, the suite fails until you move it to `attacks` or `benign`. An empty gap list does not mean the rules are complete, only that nothing in this corpus currently slips through.
 
 ```bash
 python -m uvicorn --factory sentinel.main:create_app --port 8080 &
@@ -380,6 +411,8 @@ scripts/garak_scan.sh direct <model>         # baseline (needs UPSTREAM_URI, UPS
 scripts/garak_scan.sh proxy  <model>         # through SENTINEL as agent "garak-target" (no tools)
 ```
 
+To check that `redacted_thinking: strip` does not break extended-thinking tool loops, run `scripts/verify_thinking_loop.py` against a running gateway whose upstream is the real Anthropic API (it needs `SENTINEL_AUDIT_KEY` and the same `SENTINEL_AUDIT_DB`; add `SENTINEL_AGENT_TOKEN` if agent auth is on). It has not been run in the build environment.
+
 garak scores model behaviour, so a result is "model + SENTINEL", not SENTINEL alone. The rules-only L1 will miss many garak probes (encodings, paraphrase); run with a classifier backend for a meaningful number.
 
 ### 15. Agent authentication (optional)
@@ -423,7 +456,7 @@ Anthropic(base_url="http://127.0.0.1:8080/proxy/research-bot", api_key=AGENT_TOK
 | OPA | Optional L2 decision backend (section 12), tested against a real OPA server |
 | Regulated-industry expectations | Fail-closed defaults, separation of duties (agents cannot approve), single-use bound approvals, tamper-evident audit, content hashed in logs by default |
 
-Known limits: the ML backends are unmeasured on real models (see the status note), and a classifier is itself attackable, so keep L2 to L4 in place. Alerts **notify, they do not block** (a deny/approve decision is still L2's job). Per-tool `allowed_hosts` checks URLs inside args only, not bare hostnames. Detector learning periods are call-count based. The rule-based L1 misses paraphrase, encoded, foreign-language and homoglyph attacks (see the red-team corpus) and has known false positives; use the classifier hook for those. Tokens are signed bearer tokens capped at 5 minutes; revocation is enforced only for verifiers that call `/v1/token/verify` (offline verification with the shared key cannot see it) and services must trust the SENTINEL key. The model proxy streams only in buffered mode (no latency benefit) and does not scan non-text content (set `non_text: block` per agent to refuse it). The egress proxy is HTTPS-only. Credential detection is pattern-based, so unknown formats can slip through. HMAC signing is symmetric and tail truncation of the log is not detectable from the file alone (anchor `head` off-box for stronger guarantees). Agent-facing endpoints have no auth unless you set `SENTINEL_AGENT_TOKENS` (section 15); without it, bind to localhost or put them behind your own network controls. Agent tokens are bearer secrets sent without TLS (put TLS in front); expiry applies only to tokens in the token file, and lockout is per client address and in memory.
+Known limits: the ML backends are unmeasured on real models (see the status note), and a classifier is itself attackable, so keep L2 to L4 in place. Alerts **notify, they do not block** (a deny/approve decision is still L2's job). Per-tool `allowed_hosts` checks URLs inside args only, not bare hostnames. Detector learning periods are call-count based. The rule-based L1 only catches the patterns and languages listed in section 8 and has 2 known false positives; use the classifier hook for everything else. Tokens are signed bearer tokens capped at 5 minutes; revocation is enforced only for verifiers that call `/v1/token/verify` (offline verification with the shared key cannot see it) and services must trust the SENTINEL key. The model proxy streams only in buffered mode (no latency benefit) and does not scan non-text content (set `non_text: block` per agent to refuse it). The egress proxy is HTTPS-only. Credential detection is pattern-based, so unknown formats can slip through. HMAC signing is symmetric and tail truncation of the log is not detectable from the file alone (anchor `head` off-box for stronger guarantees). Agent-facing endpoints have no auth unless you set `SENTINEL_AGENT_TOKENS` (section 15); without it, bind to localhost or put them behind your own network controls. Agent tokens are bearer secrets sent without TLS (put TLS in front); expiry applies only to tokens in the token file, and lockout is per client address and in memory.
 
 ---
 
