@@ -15,7 +15,7 @@ A defense gateway that sits between **untrusted input**, the **model**, and **to
 > [!WARNING]
 > **Do not expose SENTINEL beyond localhost without agent auth *and* TLS.** With auth off (the default) every agent-facing endpoint trusts any caller that can reach the port. With auth on, tokens are bearer secrets sent in cleartext unless you terminate TLS. On startup SENTINEL logs a boxed warning if it detects a non-loopback bind (`--host 0.0.0.0` etc.); see section 15.
 
-> **Status:** all five layers are built and tested: 204 unit tests (205 with the `opa` binary on PATH) plus a 64-case red-team corpus (36 attacks, 28 benign). The corpus has no open detection gaps and no known false positives. promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
+> **Status:** all five layers are built and tested: 204 unit tests (205 with the `opa` binary on PATH) plus a 64-case red-team corpus (36 attacks blocked, 28 benign allowed). The corpus also pins **25 known detection gaps and 17 known false positives** of the rule layer as strict expected failures (section 11), so the rules alone are not complete. promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
 >
 > **ML classifier backends (NVIDIA JailbreakDetect NIM, Meta Prompt Guard 2) are implemented but not measured against real models.** I could not download models or reach an NIM from the build environment. The NIM client is tested against a local server implementing NVIDIA's documented API, and Prompt Guard against a stand-in pipeline. Run `scripts/eval_classifier.py` on your machine to get real numbers before relying on either.
 >
@@ -133,13 +133,15 @@ sentinel/
 │   ├── approve.py                 # CLI: list / approve / deny pending actions
 │   ├── eval_classifier.py         # measure rules + classifier on the red-team corpus
 │   ├── garak_scan.sh              # garak against the model directly vs through SENTINEL
+│   ├── sandbox_smoke.py           # L3 smoke test: drives the real Sandbox runner on a host with Docker (optionally gVisor)
 │   ├── verify_log.py              # CLI: verify audit chain offline
 │   └── verify_thinking_loop.py    # live check: extended-thinking tool loop + redacted_thinking: strip (needs a real Anthropic upstream)
 ├── tests/
 │   ├── unit/                      # test_core, test_l3_l4, test_l5, test_classifier, test_opa, test_approvals,
-│   │                              # test_revocation, test_agent_auth, test_netwarn, test_proxy, test_proxy_anthropic, test_proxy_stream
+│   │                              # test_revocation, test_agent_auth, test_netwarn, test_rules_false_positives,
+│   │                              # test_proxy, test_proxy_anthropic, test_proxy_stream
 │   └── redteam/
-│       ├── cases/injection.yaml   # attacks, benign text, known gaps and known false positives (both currently empty)
+│       ├── cases/injection.yaml   # attacks (36), benign text (28), known gaps (25) and known false positives (17)
 │       ├── test_injection_corpus.py
 │       └── promptfooconfig.yaml   # same attacks through the live gateway via promptfoo
 └── .github/workflows/ci.yml       # pytest, then gateway + promptfoo
@@ -251,7 +253,15 @@ export SENTINEL_EGRESS_NETWORK=sentinel-egress SENTINEL_EGRESS_PROXY=http://<pro
 
 The proxy is the only exit. It allows HTTPS to listed hosts only and refuses IP literals and anything resolving to a private or metadata address.
 
-**Smoke test on your host** (confirms Docker, hardening flags, and no-network actually work):
+**Smoke test on your host** (confirms Docker, hardening flags, and no-network actually work). `scripts/sandbox_smoke.py` drives the same `Sandbox` runner SENTINEL uses and checks no network and no DNS, read-only root, `/tmp` noexec, non-root user, dropped capabilities, `no-new-privileges`, memory and PID limits, timeout kill, secret passed by env only (never in the `docker` argv), host env not visible, and stdin args. It exits 0 only if every check passes:
+
+```bash
+python scripts/sandbox_smoke.py                                   # plain Docker (runc)
+SENTINEL_SANDBOX_RUNTIME=runsc python scripts/sandbox_smoke.py   # gVisor
+python scripts/sandbox_smoke.py --image python:3.12-slim          # choose the test image
+```
+
+Or the one-line version of the network check:
 
 ```bash
 docker run --rm --network none --read-only --cap-drop ALL --user 65534:65534 python:3.12-slim \
@@ -281,7 +291,7 @@ Prompts are logged as SHA-256 + length by default. Set `SENTINEL_LOG_CONTENT=1` 
 
 ### 8. ML classifier backends (L1)
 
-The rules are pattern-based. They cover English, Spanish, French, German, Italian and Russian override phrasings, a set of paraphrase and persona patterns, homoglyph and leetspeak folding, and base64, hex and ROT13 payloads, all exercised by the red-team corpus. Anything outside those patterns (novel paraphrase, other languages, other encodings) will get through, so add a model with `SENTINEL_CLASSIFIER`:
+The rules are pattern-based. They cover English, Spanish, French, German, Italian and Russian override phrasings, a set of paraphrase and persona patterns, homoglyph and leetspeak folding, and base64, hex and ROT13 payloads, all exercised by the red-team corpus. Anything outside those patterns (novel paraphrase, other languages, other encodings) will get through, and the corpus lists 25 such known gaps, so add a model with `SENTINEL_CLASSIFIER`:
 
 | Backend | What it is | Runs | Needs |
 |---|---|---|---|
@@ -304,6 +314,7 @@ Behaviour you should know:
 - **Long documents are scored in full** in overlapping windows (Prompt Guard has a ~512-token window). Input that would need more than the chunk limit (default 32) is treated as an error, not truncated, because truncation is an evasion route. Raise `SENTINEL_NIM_MAX_CHUNKS` / `SENTINEL_PG_MAX_CHUNKS` if you handle large pages.
 - **Cost:** every item goes through the model, and ensembles run all members. Expect added latency per scan.
 - **Data:** with `nim`, document text goes to wherever `SENTINEL_NIM_URL` points. It defaults to localhost; do not point it at a hosted endpoint for sensitive content.
+- NIM tuning: `SENTINEL_NIM_TIMEOUT` (seconds, default 5), `SENTINEL_NIM_MAX_CHARS` (window size, default 4000), `SENTINEL_NIM_MODEL` (only needed behind NeMo's NIM Proxy). These are read by the code but not listed in `.env.example`.
 - Scores at or above `SENTINEL_CLASSIFIER_THRESHOLD` (default 0.8) are a high-severity finding. For `nim` the score is 1.0 or 0.0 from its boolean verdict. The NIM's own score field is not interpreted.
 
 ### 9. Test
@@ -312,7 +323,7 @@ Behaviour you should know:
 pytest
 ```
 
-The `opa`-backed integration test in `tests/unit/test_opa.py` is skipped when the `opa` binary is not on PATH, and the empty `known_gaps` list shows up as one skipped parametrized test.
+The `opa`-backed integration test in `tests/unit/test_opa.py` is skipped when the `opa` binary is not on PATH. A full run reports 268 passed, 1 skipped (the OPA test) and 42 xfailed: the 25 known gaps and 17 known false positives in the red-team corpus, which are expected to fail (section 11).
 
 ### 10. Alerts (L5)
 
@@ -344,7 +355,14 @@ For tools that fetch URLs, add `allowed_hosts` in `policies/agents.yaml` (see `f
 pytest tests/redteam -rfEX            # corpus: attacks, benign text, known gaps
 ```
 
-Current results on the bundled corpus (written by the same author as the rules, so treat it as a regression suite, not an independent benchmark): 36/36 attacks blocked, 28/28 benign allowed, **0 known detection gaps** (`known_gaps` is empty) and **0 known false positives** (`known_false_positives` is empty). Two former false positives, a `System: Ubuntu 24.04 LTS` header line and advice to ignore a README's instructions, are handled by narrow exemptions in `rules.py` (see below), each pinned by near-miss attacks in the corpus. Attacks cover English overrides and paraphrase, Spanish, French, German, Italian and Russian, base64, hex and ROT13, leetspeak, Cyrillic homoglyphs, fullwidth and zero-width characters, hidden tag characters, persona resets, authority claims and exfiltration instructions. Gaps and false positives are strict expected-failures: when you fix one, the suite fails until you move it to `attacks` or `benign`. An empty gap list does not mean the rules are complete, only that nothing in this corpus currently slips through.
+Current results on the bundled corpus (written by the same author as the rules, so treat it as a regression suite, not an independent benchmark): 36/36 attacks blocked and 28/28 benign allowed by the rules alone. The corpus also records what the rules **do not** handle, as strict expected failures (`xfail(strict=True)`):
+
+- **25 known detection gaps** (`known_gaps` in `tests/redteam/cases/injection.yaml`): attacks the rules miss. Examples: Chinese, Japanese, Portuguese and Dutch overrides; letter-spaced and reversed text (`i g n o r e ...`); `[INST]` and `<system>` template spoofs; "what were your original instructions" style prompt-extraction; persona games (AIM, DAN mode); tool-call and file-read requests phrased as plain instructions; markdown-image exfiltration and hidden `display:none` HTML. These need the ML classifier layer (section 8).
+- **17 known false positives** (`known_false_positives`): benign text the rules wrongly block. Examples: "Enable Developer mode in Settings", "You are now logged in", a paper about jailbreak attacks, "ignore the previous paragraph; it contained a typo", French, Italian and Russian "don't forget to read the instructions", and a `User:` / `Assistant:` chat transcript.
+
+Two earlier false positives, a `System: Ubuntu 24.04 LTS` header line and advice to ignore a README's instructions, are handled by narrow exemptions in `rules.py` (see below), each pinned by near-miss attacks in the corpus. Attacks the rules do catch cover English overrides and paraphrase, Spanish, French, German, Italian and Russian, base64, hex and ROT13, leetspeak, Cyrillic homoglyphs, fullwidth and zero-width characters, hidden tag characters, persona resets, authority claims and exfiltration instructions.
+
+Gaps and false positives are strict expected-failures: when you fix one, the suite fails until you move it to `attacks` or `benign`. The strict-xfail corpus assumes rules only. With a classifier enabled, use `scripts/eval_classifier.py` instead, which reports how many known gaps are now caught.
 
 ```bash
 python -m uvicorn --factory sentinel.main:create_app --port 8080 &
@@ -537,6 +555,7 @@ Known limits: the ML backends are unmeasured on real models (see the status note
 | Done | L5 anomaly detection and alerts; red-team corpus + promptfoo + CI workflow |
 | Done | Classifier backends: NVIDIA JailbreakDetect NIM, Prompt Guard 2, ensemble, fail-closed error policy |
 | Done | OPA policy option; token revocation; model proxy (OpenAI + Anthropic formats); garak harness |
+| Next | Close the 25 known detection gaps and 17 known false positives in the red-team corpus (the ML backends are the intended fix for the gaps) |
 | Next | Measure the ML backends and a garak baseline on your hardware and tune the threshold |
 
 ## Design principles
