@@ -58,7 +58,8 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
     detector = Detector(learn=int(os.getenv("SENTINEL_LEARN_CALLS", "50")),
                         call_limit=int(os.getenv("SENTINEL_CALL_LIMIT", "60")),
                         deny_limit=int(os.getenv("SENTINEL_DENY_LIMIT", "10")),
-                        auth_limit=int(os.getenv("SENTINEL_AUTH_ALERT_LIMIT", "10")))
+                        auth_limit=int(os.getenv("SENTINEL_AUTH_ALERT_LIMIT", "10")),
+                        learn_seconds=float(os.getenv("SENTINEL_LEARN_SECONDS", "0")))
     for ts, ev in log.events():  # rebuild baselines from history so a restart is not an amnesty
         detector.observe(ev, now=ts, emit=False)
     sinks = [log_sink] + ([webhook_sink(os.environ["SENTINEL_ALERT_WEBHOOK"])] if os.getenv("SENTINEL_ALERT_WEBHOOK") else [])

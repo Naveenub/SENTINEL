@@ -146,3 +146,27 @@ def test_allowed_hosts_permits_listed(env):
 
 def test_extract_hosts_parses_like_a_browser():
     assert extract_hosts({"a": ["see https://x.test:8443/p?q=1 and http://u:p@y.test/"]}) == ["x.test", "y.test"]
+
+
+# ---- time-based learning period
+def test_time_based_learning_ignores_call_volume():
+    d = Detector(learn=2, learn_seconds=100, call_limit=10**6)
+    got = []
+    for i in range(50):                                   # far past the call count, still inside the window
+        got += d.observe(tool(name=f"t{i}", hosts=[f"h{i}.example"]), now=i)
+    assert got == []
+    late = d.observe(tool(name="late", hosts=["new.example"]), now=101)
+    assert "new_domain" in rules(late)                    # window over: novelty alerts
+
+
+def test_time_based_clock_starts_at_first_allowed_call():
+    d = Detector(learn_seconds=100)
+    d.observe(tool(decision="deny"), now=0)               # denied calls never start the clock
+    assert d.observe(tool(hosts=["a.example"]), now=500) == []
+    assert "new_domain" in rules(d.observe(tool(hosts=["b.example"]), now=601))
+
+
+def test_count_based_default_unchanged():
+    d = Detector(learn=1)
+    d.observe(tool(hosts=["a.example"]), now=0)
+    assert "new_domain" in rules(d.observe(tool(hosts=["b.example"]), now=1))

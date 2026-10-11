@@ -4,8 +4,9 @@ Rules: policy_backend_degraded (OPA down/invalid), auth_failure_spike (per clien
 audit-log throttle does not hide floods), deny_spike, call_spike, tool_after_blocked_input, output_withheld, and (after a learning
 period of allowed calls per agent) new_domain and unusual_sequence. Denied calls never teach the
 baseline, so an attacker cannot normalise a new domain by failing against it first.
-# ponytail: baselines are rebuilt from the audit log at startup (see main.py), but the learning
-# period is call-count based, not time based; tune SENTINEL_LEARN_CALLS for your traffic.
+Learning period: call-count based by default (`learn`). With `learn_seconds` > 0 it is time based instead: an
+agent learns for that many seconds after its first allowed call, however many calls it makes (so a burst of calls
+cannot end the period early). Baselines and first-seen times are rebuilt from the audit log at startup (see main.py).
 """
 import time
 from collections import defaultdict, deque
@@ -13,8 +14,10 @@ from collections import defaultdict, deque
 
 class Detector:
     def __init__(self, learn=50, call_limit=60, deny_limit=10, window=60.0, block_window=60.0,
-                 cooldown=60.0, clock=time.time, auth_limit=10):
+                 cooldown=60.0, clock=time.time, auth_limit=10, learn_seconds=0.0):
         self.learn, self.call_limit, self.deny_limit, self.auth_limit = learn, call_limit, deny_limit, auth_limit
+        self.learn_seconds = learn_seconds
+        self._first: dict[str, float] = {}
         self.window, self.block_window, self.cooldown, self.clock = window, block_window, cooldown, clock
         self._calls, self._denies = defaultdict(deque), defaultdict(deque)
         self._auth_fails: dict[str, deque] = defaultdict(deque)
@@ -87,7 +90,8 @@ class Detector:
             return out if emit else []
 
         self._n[agent] += 1
-        learning = self._n[agent] <= self.learn
+        first = self._first.setdefault(agent, now)  # first *allowed* call; denied calls never start the clock
+        learning = now - first < self.learn_seconds if self.learn_seconds > 0 else self._n[agent] <= self.learn
         for h in ev.get("hosts", []):
             if h not in self._hosts[agent]:
                 if not learning:
