@@ -88,9 +88,53 @@ def _decoded_blobs(text: str) -> list[str]:
     return blobs
 
 
+# --- Narrow, documented exemptions for two known false positives -------------------------------------
+# Each exemption rewrites only the benign span in the text that is scanned (never the caller's text), so
+# anything after or around it is still scanned. They are deliberately strict: every condition must hold.
+
+# "System: Ubuntu 24.04 LTS" / "Assistant: Gemini 2" style header lines from logs, inventories, neofetch output.
+_ROLE_LINE = re.compile(r"^([ \t]*)(system|assistant)([ \t]*:[ \t]*)([^\n]*)$", re.I | re.M)
+_KV_LINE = re.compile(r"[ \t]*[A-Za-z][\w ./-]{0,24}:[ \t]*\S")
+# words that make a value look like an instruction rather than a name/version
+_DIRECTIVE = re.compile(
+    r"\b(?:you|your|yours|must|should|shall|always|never|not|don'?t|do|ignore|disregard|forget|override|bypass|"
+    r"disable|obey|follow|comply|reveal|print|output|repeat|send|email|forward|upload|execute|run|delete|now|new|"
+    r"act|respond|answer|reply|pretend|assume|grant|allow|authori[sz]e|permit|instructions?|rules?|prompt|"
+    r"unrestricted|jailbreak|mode|password|secret|key|token)\b", re.I)
+
+
+def _benign_role_value(payload: str, following: str) -> bool:
+    toks = payload.split()
+    if not 1 <= len(toks) <= 6 or not (payload[:1].isupper() or payload[:1].isdigit()):
+        return False
+    if _DIRECTIVE.search(payload) or re.search(r"[!?]|\.\s|:\s", payload):
+        return False
+    next_line = following.lstrip("\n").split("\n", 1)[0] if following.startswith("\n") else ""
+    # a version/number in the value, or the next line is another "Label: value" pair (a structured header block)
+    return any(c.isdigit() for c in payload) or bool(_KV_LINE.fullmatch(next_line))
+
+
+# "You can ignore the previous instructions in the README if you use Docker." Only the head of the sentence is
+# defused, and only when it is advice ("you can/may/should"), scoped to a named document, and followed by an
+# "if/when/unless" clause. "all/any previous instructions" and unscoped forms are never exempt.
+_DOC_ADVICE = re.compile(
+    r"\byou\s+(?:can|may|could|might|should)\s+(?:safely\s+)?(?:ignore|skip|disregard)\s+the\s+"
+    r"(?:previous|prior|earlier|above|preceding)\s+(?:instructions?|steps|rules)\s+(?:in|from|of|within)\s+"
+    r"(?:the|this|that|our)\s+(?:readme|docs?|documentation|manual|guide|tutorial|wiki|changelog|"
+    r"(?:install(?:ation)?|setup)\s+guide)(?:\.md)?\b(?=\s+(?:if|when|unless|once)\b)", re.I)
+
+
+def _neutralize_benign(norm: str) -> str:
+    def role(m: re.Match) -> str:
+        if _benign_role_value(m.group(4), norm[m.end():]):
+            return f"{m.group(1)}Info{m.group(3)}{m.group(4)}"  # role word swapped for a neutral label
+        return m.group(0)
+    return _DOC_ADVICE.sub("a note about the docs", _ROLE_LINE.sub(role, norm))
+
+
 def _match(norm: str) -> dict[str, int]:
     hits: dict[str, int] = {}
-    for v in _variants(norm):
+    for v in _variants(_neutralize_benign(norm)):
         for name, sev, rx in RULES:
             if rx.search(v):
                 hits[name] = max(sev, hits.get(name, 0))
