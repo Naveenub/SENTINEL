@@ -18,7 +18,9 @@ refuses tokens that are short, belong to an unknown agent, are shared by two age
 or verifier token (an agent must never be able to approve its own requests).
 
 Expiry (optional): in the token file a token may be an object, {"token": "<t>", "expires": "2026-12-31T00:00:00Z"}
-(ISO 8601; no timezone means UTC). An expired token is rejected like an invalid one. Env tokens never expire.
+(ISO 8601; no timezone means UTC). An expired token is rejected like an invalid one. Env tokens take the same
+end date as a suffix: SENTINEL_AGENT_TOKENS="research-bot=<token>;expires=2026-12-31T00:00:00Z". Set
+SENTINEL_REQUIRE_TOKEN_EXPIRY=1 to refuse to start with any token (env or file) that has no expiry.
 
 Lockout: FailureLimiter blocks a client address after repeated *invalid* tokens (guessing), with 429 + Retry-After.
 Missing tokens and valid-token-wrong-agent (403) do not count.
@@ -36,13 +38,15 @@ MIN_LEN = 16
 _HEADERS = ("x-sentinel-agent-token", "authorization", "x-api-key")
 
 
-def _parse_env(raw: str) -> dict[str, list[str]]:
-    out: dict[str, list[str]] = {}
+def _parse_env(raw: str) -> dict[str, list]:
+    out: dict[str, list] = {}
     for part in filter(None, (p.strip() for p in raw.split(","))):
         agent, sep, tok = part.partition("=")
+        tok, _, exp = tok.partition(";expires=")
         if not sep or not agent.strip() or not tok.strip():
-            raise ValueError("SENTINEL_AGENT_TOKENS entries must look like agent=token")
-        out.setdefault(agent.strip(), []).append(tok.strip())
+            raise ValueError("SENTINEL_AGENT_TOKENS entries must look like agent=token or agent=token;expires=<ISO 8601>")
+        entry = (tok.strip(), _parse_expiry(exp.strip(), agent.strip())) if exp.strip() else tok.strip()
+        out.setdefault(agent.strip(), []).append(entry)
     return out
 
 
@@ -140,6 +144,10 @@ class AgentAuth:
         for src in sources:
             for agent, toks in src.items():
                 tokens.setdefault(agent, []).extend(toks)
+        if os.getenv("SENTINEL_REQUIRE_TOKEN_EXPIRY") == "1":
+            bare = sorted(a for a, toks in tokens.items() if any(isinstance(t, str) for t in toks))
+            if bare:  # fail closed at startup, like short or shared tokens
+                raise ValueError(f"SENTINEL_REQUIRE_TOKEN_EXPIRY=1: tokens without an expiry for {bare}")
         return cls(tokens, agents, reserved) if tokens else None
 
     def identify(self, headers) -> tuple[str | None, bool]:

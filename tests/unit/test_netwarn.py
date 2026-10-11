@@ -36,3 +36,19 @@ def test_silent_on_loopback_and_when_acked():
     assert warn_if_exposed(True, ["--host", "127.0.0.1"], {}) is None
     assert warn_if_exposed(False, [], {}) is None
     assert warn_if_exposed(True, ["--host", "0.0.0.0"], {"SENTINEL_ACK_NONLOOPBACK": "1"}) is None
+
+
+def test_tls_quiets_auth_on_warning_but_not_auth_off():
+    argv = ["--host", "0.0.0.0", "--ssl-keyfile", "k.pem", "--ssl-certfile=c.pem"]
+    assert warn_if_exposed(True, argv, {}) is None
+    assert "auth is OFF" in warn_if_exposed(False, argv, {})
+    assert warn_if_exposed(True, ["--host", "0.0.0.0"], {"SENTINEL_TLS_CERT": "c", "SENTINEL_TLS_KEY": "k"}) is None
+    assert warn_if_exposed(True, ["--host", "0.0.0.0", "--ssl-keyfile", "k.pem"], {})  # half a pair is not TLS
+
+
+def test_require_tls_refuses_plain_nonloopback_even_if_acked():
+    env = {"SENTINEL_REQUIRE_TLS": "1", "SENTINEL_ACK_NONLOOPBACK": "1"}
+    with pytest.raises(RuntimeError):
+        warn_if_exposed(True, ["--host", "0.0.0.0"], env)
+    assert warn_if_exposed(True, ["--host", "127.0.0.1"], env) is None
+    assert warn_if_exposed(True, ["--host", "0.0.0.0", "--ssl-keyfile", "k", "--ssl-certfile", "c"], env) is None

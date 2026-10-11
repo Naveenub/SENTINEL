@@ -264,3 +264,28 @@ def test_failure_flood_alerts_even_though_the_audit_log_is_throttled(make):
     assert [a["rule"] for a in al] == ["auth_failure_spike"] and al[0]["severity"] == "high"
     assert "guess-0123456789abcdef" not in json.dumps(al)
     assert c.get("/v1/audit/verify", headers=ADMIN).json()["ok"] is True
+
+
+# ---- env token expiry
+def test_env_token_expiry_parsed_and_enforced(monkeypatch):
+    from sentinel.auth import AgentAuth
+    monkeypatch.setenv("SENTINEL_AGENT_TOKENS", "a=" + "x" * 20 + ";expires=2030-01-01T00:00:00Z,b=" + "y" * 20)
+    monkeypatch.delenv("SENTINEL_AGENT_TOKENS_FILE", raising=False)
+    monkeypatch.delenv("SENTINEL_REQUIRE_TOKEN_EXPIRY", raising=False)
+    assert AgentAuth.from_env({"a", "b"}) is not None
+    monkeypatch.setenv("SENTINEL_AGENT_TOKENS", "a=" + "x" * 20 + ";expires=not-a-date")
+    import pytest
+    with pytest.raises(ValueError):
+        AgentAuth.from_env({"a"})
+
+
+def test_require_token_expiry_fails_startup_on_bare_token(monkeypatch):
+    import pytest
+    from sentinel.auth import AgentAuth
+    monkeypatch.delenv("SENTINEL_AGENT_TOKENS_FILE", raising=False)
+    monkeypatch.setenv("SENTINEL_REQUIRE_TOKEN_EXPIRY", "1")
+    monkeypatch.setenv("SENTINEL_AGENT_TOKENS", "a=" + "x" * 20)
+    with pytest.raises(ValueError, match="without an expiry"):
+        AgentAuth.from_env({"a"})
+    monkeypatch.setenv("SENTINEL_AGENT_TOKENS", "a=" + "x" * 20 + ";expires=2030-01-01T00:00:00Z")
+    assert AgentAuth.from_env({"a"}) is not None

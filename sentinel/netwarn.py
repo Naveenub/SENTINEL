@@ -4,6 +4,9 @@ create_app() cannot see the address uvicorn binds to, so this is best effort. In
 SENTINEL_BIND_HOST (explicit), `--host` in argv, UVICORN_HOST, then uvicorn's default (127.0.0.1).
 `--uds` (unix socket) counts as local. Under gunicorn or another launcher, set SENTINEL_BIND_HOST.
 SENTINEL_ACK_NONLOOPBACK=1 silences the warning once TLS or a private network is in place.
+TLS is recognised from `--ssl-keyfile` + `--ssl-certfile` in argv or SENTINEL_TLS_CERT + SENTINEL_TLS_KEY (set by
+`python -m sentinel`). With SENTINEL_REQUIRE_TLS=1 a non-loopback bind without TLS refuses to start (ACK does not
+override it).
 """
 import ipaddress
 import logging
@@ -39,8 +42,15 @@ def is_loopback(host: str) -> bool:
         return False  # 0.0.0.0, ::, or a hostname: assume reachable from outside
 
 
-def exposure_warning(auth_on: bool, host: str) -> str | None:
-    if is_loopback(host):
+def tls_enabled(argv: list[str] | None = None, env=None) -> bool:
+    argv = sys.argv if argv is None else argv
+    env = os.environ if env is None else env
+    flag = lambda n: any(a == n or a.startswith(n + "=") for a in argv)  # noqa: E731
+    return (flag("--ssl-keyfile") and flag("--ssl-certfile")) or bool(env.get("SENTINEL_TLS_CERT") and env.get("SENTINEL_TLS_KEY"))
+
+
+def exposure_warning(auth_on: bool, host: str, tls: bool = False) -> str | None:
+    if is_loopback(host) or (tls and auth_on):
         return None
     bar = "!" * 78
     if auth_on:
@@ -57,9 +67,13 @@ def exposure_warning(auth_on: bool, host: str) -> str | None:
 
 def warn_if_exposed(auth_on: bool, argv: list[str] | None = None, env=None) -> str | None:
     env = os.environ if env is None else env
+    host, tls = bind_host(argv, env), tls_enabled(argv, env)
+    if env.get("SENTINEL_REQUIRE_TLS") == "1" and not is_loopback(host) and not tls:
+        raise RuntimeError(f"SENTINEL_REQUIRE_TLS=1 but bound to {host} without TLS "
+                           "(use `python -m sentinel` with SENTINEL_TLS_CERT/SENTINEL_TLS_KEY, or uvicorn --ssl-*)")
     if env.get("SENTINEL_ACK_NONLOOPBACK") == "1":
         return None
-    msg = exposure_warning(auth_on, bind_host(argv, env))
+    msg = exposure_warning(auth_on, host, tls)
     if msg:
         log.warning(msg)
     return msg
