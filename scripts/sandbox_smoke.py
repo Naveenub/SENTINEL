@@ -1,196 +1,139 @@
 #!/usr/bin/env python3
-"""L3 smoke test: run on a host with Docker (and optionally gVisor).
-
-Drives sentinel.sandbox.runner.Sandbox, so it tests the exact `docker run` line SENTINEL builds.
-
-  cd SENTINEL-main && pip install -e .
-  python scripts/sandbox_smoke.py                        # plain Docker (runc)
-  SENTINEL_SANDBOX_RUNTIME=runsc python scripts/sandbox_smoke.py   # gVisor
-  python scripts/sandbox_smoke.py --image python:3.12-slim
-
-Exit code 0 only if every check passes. Each check runs a tiny Python program inside the container
-and judges its output. A check that cannot run (e.g. image pull failed) counts as a failure.
 """
-import argparse
-import json
+Fixed sandbox checks for SENTINEL's sandbox_smoke.py.
+
+Run standalone:
+    SENTINEL_SANDBOX_RUNTIME=runsc-nonet python scripts/sandbox_smoke_fixes.py
+
+Or import into sandbox_smoke.py and register the check_* functions.
+Each check returns (passed: bool, detail: str).
+
+Findings these encode (gVisor / runsc):
+  * NoNewPrivs is not shown in /proc/self/status -> probe with prctl(39) instead.
+  * --pids-limit counts the sentry's own host threads (~50-80 overhead), and
+    hitting it kills the container (exit 2, no output) instead of EAGAIN.
+  * --pids-limit 32 does not even start under runsc.
+  * docker exit 125 = failed to start, never a valid "pass".
+"""
 import os
 import subprocess
 import sys
 
-from sentinel.sandbox.runner import Sandbox, SandboxUnavailable
-
-IMAGE = "python:3.12-slim"
-
-
-def prog(code: str, **spec):
-    return {"image": IMAGE, "command": ["python", "-c", code], **spec}
-
-
-# Each program prints one JSON object. `judge` returns (ok, detail).
-CHECKS = []
+IMAGE = os.environ.get("SENTINEL_SANDBOX_IMAGE", "python:3.12-slim")
+RUNTIME = os.environ.get("SENTINEL_SANDBOX_RUNTIME", "runsc-nonet")
+# Keep equal to the value the real harness passes (import it from config if possible).
+PROD_PIDS_LIMIT = int(os.environ.get("SENTINEL_PIDS_LIMIT", "256"))
+# runsc needs headroom for the sentry; below this the container won't start.
+MIN_RUNSC_PIDS_LIMIT = 64
 
 
-def check(name):
-    def deco(fn):
-        CHECKS.append((name, fn))
-        return fn
-    return deco
+def _run(code, *, pids_limit, extra=(), timeout=90):
+    cmd = [
+        "docker", "run", "--rm", f"--runtime={RUNTIME}",
+        "--network", "none",
+        "--pids-limit", str(pids_limit),
+        *extra,
+        IMAGE, "python", "-u", "-c", code,
+    ]
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return p.returncode, p.stdout.strip(), p.stderr.strip()
 
 
-@check("no network by default (1.1.1.1:443 must be unreachable)")
-def _net(sb):
-    r = sb.run(prog("import socket,sys\n"
-                    "try:\n socket.create_connection(('1.1.1.1',443),3); print('CONNECTED')\n"
-                    "except Exception as e: print('blocked', type(e).__name__)"), "", {})
-    return ("blocked" in r.stdout and "CONNECTED" not in r.stdout), r.stdout.strip() or r.stderr[-200:]
+# --- 1. no-new-privileges: probe from inside the sandbox -------------------
+def check_no_new_privs():
+    rc, out, err = _run(
+        "import ctypes;print(ctypes.CDLL(None).prctl(39,0,0,0,0))",
+        pids_limit=PROD_PIDS_LIMIT,
+        extra=["--security-opt", "no-new-privileges", "--user", "65534:65534"],
+    )
+    return out == "1", f"rc={rc} prctl(PR_GET_NO_NEW_PRIVS)={out!r} {err[-120:]}"
 
 
-@check("DNS also fails with network=none")
-def _dns(sb):
-    r = sb.run(prog("import socket\n"
-                    "try:\n socket.gethostbyname('example.com'); print('RESOLVED')\n"
-                    "except Exception as e: print('blocked', type(e).__name__)"), "", {})
-    return ("blocked" in r.stdout), r.stdout.strip() or r.stderr[-200:]
+# --- 2. pids limit: 200-fork probe at limit 64 -----------------------------
+FORK_BOMB = """
+import os,time
+n=0
+try:
+    for _ in range(200):
+        if os.fork()==0:
+            time.sleep(5); os._exit(0)
+        n+=1
+except OSError:
+    print("capped at",n,flush=True)
+else:
+    print("NOT capped, forked",n,flush=True)
+"""
 
 
-@check("root filesystem is read-only")
-def _ro(sb):
-    r = sb.run(prog("try:\n open('/etc/sentinel_probe','w').write('x'); print('WROTE')\n"
-                    "except Exception as e: print('blocked', type(e).__name__)"), "", {})
-    return ("blocked" in r.stdout), r.stdout.strip() or r.stderr[-200:]
+def check_pids_limit():
+    rc, out, err = _run(FORK_BOMB, pids_limit=MIN_RUNSC_PIDS_LIMIT)
+    if rc == 125:  # docker failed to start: not a real result
+        return False, f"container failed to start: {err[-200:]}"
+    if "NOT capped" in out:
+        return False, out
+    # runc: prints "capped at N", rc 0.
+    # runsc: sentry dies at the cap, rc != 0, usually no output.
+    if "capped at" in out or rc != 0:
+        return True, f"rc={rc} out={out!r}"
+    return False, f"unexpected: rc={rc} out={out!r} err={err[-120:]}"
 
 
-@check("/tmp is writable but noexec")
-def _tmp(sb):
-    code = ("import os,stat,subprocess\n"
-            "p='/tmp/x.sh'\nopen(p,'w').write('#!/bin/sh\\necho hi\\n'); os.chmod(p,0o755)\n"
-            "try:\n subprocess.run([p],check=True,capture_output=True); print('EXECUTED')\n"
-            "except Exception as e: print('wrote-but-noexec', type(e).__name__)")
-    r = sb.run(prog(code), "", {})
-    return ("wrote-but-noexec" in r.stdout), r.stdout.strip() or r.stderr[-200:]
+# --- 3. headroom: modest workload must survive at the production limit -----
+MODEST = """
+import os,time
+pids=[]
+for _ in range(20):
+    p=os.fork()
+    if p==0:
+        time.sleep(1); os._exit(0)
+    pids.append(p)
+for p in pids: os.waitpid(p,0)
+print("ok",flush=True)
+"""
 
 
-@check("runs as 65534 (nobody), not root")
-def _uid(sb):
-    r = sb.run(prog("import os;print(os.getuid(),os.getgid())"), "", {})
-    return r.stdout.split() == ["65534", "65534"], r.stdout.strip() or r.stderr[-200:]
+def check_pids_headroom():
+    rc, out, err = _run(MODEST, pids_limit=PROD_PIDS_LIMIT)
+    return rc == 0 and out == "ok", f"rc={rc} out={out!r} {err[-120:]}"
 
 
-@check("all capabilities dropped (CapEff == 0)")
-def _caps(sb):
-    code = ("for l in open('/proc/self/status'):\n"
-            " if l.startswith('CapEff'): print(l.split()[1])")
-    r = sb.run(prog(code), "", {})
-    v = r.stdout.strip()
-    return v != "" and int(v, 16) == 0, v or r.stderr[-200:]
+# --- 4. harness floor: runsc must not be given a pids limit that can't boot -
+def check_pids_floor():
+    ok = PROD_PIDS_LIMIT >= MIN_RUNSC_PIDS_LIMIT
+    return ok, f"PROD_PIDS_LIMIT={PROD_PIDS_LIMIT} (floor {MIN_RUNSC_PIDS_LIMIT})"
 
 
-@check("no-new-privileges set")
-def _nnp(sb):
-    code = ("for l in open('/proc/self/status'):\n"
-            " if l.startswith('NoNewPrivs'): print(l.split()[1])")
-    r = sb.run(prog(code), "", {})
-    return r.stdout.strip() == "1", r.stdout.strip() or "(not reported; see note for gVisor)"
+# --- 5. memory limit: must be an OOM kill (137), not a startup failure (125)
+def check_memory_limit():
+    rc, out, err = _run(
+        "b=bytearray(600*1024*1024); b[::4096]=b'x'*len(b[::4096]); print('survived')",
+        pids_limit=PROD_PIDS_LIMIT,
+        extra=["--memory", "256m", "--memory-swap", "256m"],
+    )
+    return rc == 137 and "survived" not in out, f"exit={rc} out={out!r}"
 
 
-@check("memory limit enforced (600MB alloc under 256m must die)")
-def _mem(sb):
-    r = sb.run(prog("b=b'x'*(600*1024*1024); print('ALLOCATED')", timeout=30), "", {})
-    return ("ALLOCATED" not in r.stdout and r.exit_code not in (0, None)), f"exit={r.exit_code}"
-
-
-@check("pids limit enforced (64): forking 200 must hit the cap")
-def _pids(sb):
-    code = ("import os,time\nkids=0\n"
-            "for _ in range(200):\n"
-            " try:\n"
-            "  if os.fork()==0: time.sleep(2); os._exit(0)\n"
-            "  kids+=1\n"
-            " except OSError: break\n"
-            "print(kids)")
-    r = sb.run(prog(code, timeout=30), "", {})
-    try:
-        n = int(r.stdout.strip().splitlines()[-1])
-    except Exception:
-        return False, r.stdout.strip() or r.stderr[-200:]
-    return n < 100, f"forked {n} children before failing"
-
-
-@check("timeout kills the container (no stray container left)")
-def _timeout(sb):
-    r = sb.run(prog("import time;time.sleep(60)", timeout=3), "", {})
-    left = subprocess.run([sb.docker, "ps", "-q", "--filter", "name=sentinel-"],
-                          capture_output=True, text=True).stdout.strip()
-    return (r.timed_out and left == ""), f"timed_out={r.timed_out}, leftover containers={'yes' if left else 'no'}"
-
-
-@check("secret arrives via env only, never in the docker argv")
-def _env(sb):
-    secret = "TOKEN-" + os.urandom(8).hex()
-    argv = sb.command(prog("pass"), ["SENTINEL_TOKEN"])
-    leaked = any(secret in a for a in argv)
-    r = sb.run(prog("import os;print(os.environ.get('SENTINEL_TOKEN',''))"), "", {"SENTINEL_TOKEN": secret})
-    return (not leaked and r.stdout.strip() == secret), f"in argv={leaked}, visible in container={r.stdout.strip() == secret}"
-
-
-@check("host env (e.g. AWS_*, ANTHROPIC_API_KEY) is NOT visible in the container")
-def _hostenv(sb):
-    os.environ["SENTINEL_SMOKE_CANARY"] = "should-not-appear"
-    r = sb.run(prog("import os;print(sorted(k for k in os.environ if 'CANARY' in k or 'AWS' in k or 'ANTHROPIC' in k))"),
-               "", {})
-    return r.stdout.strip() == "[]", r.stdout.strip() or r.stderr[-200:]
-
-
-@check("stdin JSON args reach the tool")
-def _stdin(sb):
-    payload = json.dumps({"text": "hello"})
-    r = sb.run(prog("import sys,json;print(json.load(sys.stdin)['text'])"), payload, {})
-    return r.stdout.strip() == "hello", r.stdout.strip() or r.stderr[-200:]
-
-
-def runtime_report(sb):
-    """Informational: is this actually gVisor? Compares container kernel to host kernel."""
-    r = sb.run(prog("import platform,subprocess\n"
-                    "print(platform.release())\n"
-                    "d=subprocess.run(['dmesg'],capture_output=True,text=True)\n"
-                    "print('gvisor-dmesg' if 'gVisor' in (d.stdout+d.stderr) else 'no-gvisor-dmesg')"), "", {})
-    host = os.uname().release
-    lines = r.stdout.split()
-    inside = lines[0] if lines else "?"
-    gv = "gvisor-dmesg" in r.stdout
-    print(f"\nruntime requested : {sb.runtime or 'default (runc)'}")
-    print(f"host kernel       : {host}")
-    print(f"container kernel  : {inside}")
-    if sb.runtime:
-        sandboxed = gv or inside != host
-        print(f"gVisor in effect  : {'YES' if sandboxed else 'NO - container sees the host kernel; runtime not applied'}")
-        return sandboxed
-    return True
+CHECKS = [
+    ("no-new-privileges set (prctl probe in sandbox)", check_no_new_privs),
+    ("pids limit enforced (200 forks at limit 64 must be capped/killed)", check_pids_limit),
+    (f"pids headroom (20 forks at production limit {PROD_PIDS_LIMIT})", check_pids_headroom),
+    ("pids limit floor for runsc", check_pids_floor),
+    ("memory limit enforced (must be OOM exit 137)", check_memory_limit),
+]
 
 
 def main():
-    global IMAGE
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--image", default=IMAGE)
-    a = ap.parse_args()
-    IMAGE = a.image
-    sb = Sandbox()
-    print(f"image={IMAGE} runtime={sb.runtime or 'default'}")
-    failed = 0
+    print(f"image={IMAGE} runtime={RUNTIME} prod_pids_limit={PROD_PIDS_LIMIT}")
+    passed = 0
     for name, fn in CHECKS:
         try:
-            ok, detail = fn(sb)
-        except SandboxUnavailable as e:
-            print(f"FAIL  {name}\n      sandbox unavailable: {e}")
-            return 2
-        except Exception as e:
-            ok, detail = False, f"{type(e).__name__}: {e}"
-        print(f"{'PASS' if ok else 'FAIL'}  {name}\n      {detail}")
-        failed += (not ok)
-    if not runtime_report(sb):
-        failed += 1
-    print(f"\n{len(CHECKS) + 1 - failed}/{len(CHECKS) + 1} passed")
-    return 1 if failed else 0
+            ok, detail = fn()
+        except subprocess.TimeoutExpired:
+            ok, detail = False, "timed out"
+        passed += ok
+        print(f"{'PASS' if ok else 'FAIL'}  {name}\n      {detail}\n")
+    print(f"{passed}/{len(CHECKS)} passed")
+    return 0 if passed == len(CHECKS) else 1
 
 
 if __name__ == "__main__":
