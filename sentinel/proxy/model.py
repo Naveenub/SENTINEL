@@ -88,6 +88,9 @@ class ModelProxy:
         if not self.pipe.engine.has_agent(agent):
             aud("deny", "unknown agent")
             return 403, fmt.error(403, "unknown_agent", "agent is not defined in policy")
+        if self.pipe.engine.quarantine_reason(agent):
+            aud("deny", "agent quarantined")
+            return 403, fmt.error(403, "agent_quarantined", "agent is quarantined after a security alert")
         if stream and self.stream == "reject":
             return 400, fmt.error(400, "streaming_unsupported", "stream=true is not supported through SENTINEL")
         if not fmt.valid(body):

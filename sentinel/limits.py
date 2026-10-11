@@ -18,6 +18,7 @@ class LimitStore:
             CREATE TABLE IF NOT EXISTS auth_fails(client TEXT NOT NULL, ts REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS auth_fails_c ON auth_fails(client, ts);
             CREATE TABLE IF NOT EXISTS lockouts(client TEXT PRIMARY KEY, until REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS quarantine(agent TEXT PRIMARY KEY, until REAL NOT NULL, rule TEXT NOT NULL);
             """
         )
 
@@ -56,3 +57,31 @@ class LimitStore:
                 self.db.execute("DELETE FROM auth_fails WHERE client=?", (client,))
             self.db.commit()
             return locked
+
+    # ---- agent quarantine (alert -> block)
+
+    def quarantine(self, agent: str, rule: str, seconds: float, now: float) -> bool:
+        """Quarantine an agent. No-op (False) while one is already active, so denials caused by the
+        quarantine itself can never extend it."""
+        with self._lock:
+            self.db.execute("DELETE FROM quarantine WHERE until<=?", (now,))
+            cur = self.db.execute("INSERT OR IGNORE INTO quarantine VALUES(?,?,?)", (agent, now + seconds, rule))
+            self.db.commit()
+            return cur.rowcount == 1
+
+    def quarantined(self, agent: str, now: float) -> str | None:
+        """The rule that quarantined this agent, or None."""
+        with self._lock:
+            row = self.db.execute("SELECT rule, until FROM quarantine WHERE agent=?", (agent,)).fetchone()
+        return row[0] if row and row[1] > now else None
+
+    def release(self, agent: str) -> bool:
+        with self._lock:
+            cur = self.db.execute("DELETE FROM quarantine WHERE agent=?", (agent,))
+            self.db.commit()
+            return cur.rowcount == 1
+
+    def quarantine_list(self, now: float) -> list[dict]:
+        with self._lock:
+            rows = self.db.execute("SELECT agent, rule, until FROM quarantine WHERE until>? ORDER BY agent", (now,)).fetchall()
+        return [{"agent": a, "rule": r, "until": u} for a, r, u in rows]

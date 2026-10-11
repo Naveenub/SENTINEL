@@ -76,6 +76,20 @@ class PolicyEngine:
         self._approvals = approvals or ApprovalStore()  # in-memory unless the caller passes a persistent store
         self._lock = threading.Lock()
 
+    def quarantine_reason(self, agent: str) -> str | None:
+        """Rule that put this agent in quarantine (alert -> block, see main.py), or None."""
+        rule = self._limits.quarantined(agent, time.time())
+        return f"agent quarantined ({rule})" if rule else None
+
+    def quarantine(self, agent: str, rule: str, seconds: float) -> bool:
+        return agent in self._agents and self._limits.quarantine(agent, rule, seconds, time.time())
+
+    def release(self, agent: str) -> bool:
+        return self._limits.release(agent)
+
+    def quarantine_list(self) -> list[dict]:
+        return self._limits.quarantine_list(time.time())
+
     def has_agent(self, agent: str) -> bool:
         return agent in self._agents
 
@@ -118,10 +132,16 @@ class PolicyEngine:
     def preflight(self, agent: str, tool: str, args: dict) -> ToolDecision:
         """Can this call ever be allowed? No rate limit, no approval record: used on model-proposed
         tool calls, which are authorized again (for real) when the runtime executes them."""
+        q = self.quarantine_reason(agent)
+        if q:
+            return ToolDecision(decision="deny", reason=q)
         deny, _ = self._check(agent, tool, args)
         return deny or ToolDecision(decision="allow", reason="preflight ok")
 
     def authorize(self, agent: str, tool: str, args: dict, approval_id: str | None = None) -> ToolDecision:
+        q = self.quarantine_reason(agent)
+        if q:
+            return ToolDecision(decision="deny", reason=q)
         deny, need_approval = self._check(agent, tool, args)
         if deny:
             return deny

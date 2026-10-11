@@ -8,6 +8,9 @@ from pydantic import BaseModel
 
 from sentinel.auth import AgentAuth, FailureLimiter
 from sentinel.limits import LimitStore
+
+QUARANTINE_RULES = frozenset({"deny_spike", "call_spike", "tool_after_blocked_input", "output_withheld",
+                              "new_domain", "unusual_sequence"})
 from sentinel.audit.alerts import log_sink, webhook_sink
 from sentinel.audit.detect import Detector
 from sentinel.audit.log import AuditLog
@@ -60,9 +63,18 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
         detector.observe(ev, now=ts, emit=False)
     sinks = [log_sink] + ([webhook_sink(os.environ["SENTINEL_ALERT_WEBHOOK"])] if os.getenv("SENTINEL_ALERT_WEBHOOK") else [])
 
+    # Alert -> block (opt-in). Only rules keyed by a real agent; auth_failure_spike is excluded on purpose
+    # (its "agent" is attacker-claimed, so quarantining it would let anyone lock out a legitimate agent).
+    block_rules = {r.strip() for r in os.getenv("SENTINEL_ALERT_BLOCK", "").split(",") if r.strip()}
+    if not block_rules <= QUARANTINE_RULES:
+        raise ValueError(f"SENTINEL_ALERT_BLOCK must be drawn from {sorted(QUARANTINE_RULES)}")
+    quarantine_s = float(os.getenv("SENTINEL_QUARANTINE_SECONDS", "900"))
+
     def emit(alerts: list[dict]) -> None:
         for a in alerts:
             log.append({"type": "alert", **a})  # alerts are themselves tamper-evident
+            if a["rule"] in block_rules and engine.quarantine(a["agent"], a["rule"], quarantine_s):
+                log.append({"type": "quarantine", "agent": a["agent"], "rule": a["rule"], "seconds": quarantine_s})
             for s in sinks:
                 s(a)
 
@@ -275,6 +287,17 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
     @app.post("/v1/approvals/{aid}/deny", dependencies=[Depends(admin)])
     def deny(aid: str):
         return _resolve(aid, False)
+
+    @app.get("/v1/quarantine", dependencies=[Depends(admin)])
+    def quarantine_list():
+        return engine.quarantine_list()
+
+    @app.post("/v1/agents/{agent}/release", dependencies=[Depends(admin)])
+    def release(agent: str):
+        if not engine.release(agent):
+            raise HTTPException(404, "agent is not quarantined")
+        log.append({"type": "release", "agent": agent})
+        return {"agent": agent, "released": True}
 
     @app.get("/v1/alerts", dependencies=[Depends(admin)])
     def alerts(limit: int = 50):

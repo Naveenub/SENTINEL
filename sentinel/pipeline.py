@@ -30,6 +30,9 @@ class Pipeline:
     def scan(self, req: ScanRequest) -> ScanResponse:
         findings: list[Finding] = []
         blocked = False
+        if self.engine.quarantine_reason(req.agent):  # alert -> block: a quarantined agent gets no clean verdicts
+            findings.append(Finding(rule="agent_quarantined", severity=3, item=0))
+            blocked = True
         for i, item in enumerate(req.items):
             hits = scan_text(item.text)
             if self.classifier:
