@@ -15,7 +15,7 @@ A defense gateway that sits between **untrusted input**, the **model**, and **to
 > [!WARNING]
 > **Do not expose SENTINEL beyond localhost without agent auth *and* TLS.** With auth off (the default) every agent-facing endpoint trusts any caller that can reach the port. With auth on, tokens are bearer secrets sent in cleartext unless you terminate TLS. On startup SENTINEL logs a boxed warning if it detects a non-loopback bind (`--host 0.0.0.0` etc.); see section 15.
 
-> **Status:** all five layers are built and tested: 204 unit tests (205 with the `opa` binary on PATH) plus a 64-case red-team corpus (36 attacks blocked, 28 benign allowed). The corpus also pins **25 known detection gaps and 17 known false positives** of the rule layer as strict expected failures (section 11), so the rules alone are not complete. promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
+> **Status:** all five layers are built and tested: 217 unit tests (218 with the `opa` binary on PATH) plus a 64-case red-team corpus (36 attacks blocked, 28 benign allowed). The corpus also pins **25 known detection gaps and 17 known false positives** of the rule layer as strict expected failures (section 11), so the rules alone are not complete. promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
 >
 > **ML classifier backends (NVIDIA JailbreakDetect NIM, Meta Prompt Guard 2) are implemented but not measured against real models.** I could not download models or reach an NIM from the build environment. The NIM client is tested against a local server implementing NVIDIA's documented API, and Prompt Guard against a stand-in pipeline. Run `scripts/eval_classifier.py` on your machine to get real numbers before relying on either.
 >
@@ -51,7 +51,7 @@ A defense gateway that sits between **untrusted input**, the **model**, and **to
         └───────────────┬────────────────┘  email, deletes
                         ▼
         ┌────────────────────────────────┐
-        │  L3  SANDBOX                   │  gVisor / Firecracker
+        │  L3  SANDBOX                   │  Docker, gVisor-ready
         │  no ambient creds, egress      │  read-only FS
         │  allowlist, read-only FS       │
         └───────────────┬────────────────┘
@@ -75,11 +75,11 @@ A defense gateway that sits between **untrusted input**, the **model**, and **to
 |---|---|---|
 | L1 Input filter | Detect injection, jailbreaks, hidden instructions; tag external content untrusted | Built |
 | L2 Tool policy | Deny-by-default, schema validation, rate limits, human approval | Built |
-| L3 Sandbox | Containers/microVMs, no ambient creds, egress allowlist, read-only FS | Built (verify on your host) |
+| L3 Sandbox | Hardened Docker containers (gVisor via `runsc`), no ambient creds, egress allowlist, read-only FS | Built (verify on your host) |
 | L4 Secrets & data | Short-lived scoped tokens, output scanning | Built |
 | L5 Audit | Signed hash-chained log + anomaly alerts | Built |
 
-**Stack:** Python / FastAPI proxy · YAML or OPA policy · gVisor / Firecracker · SQLite / Postgres · garak / promptfoo
+**Stack:** Python / FastAPI proxy · YAML or OPA policy · Docker (+ gVisor `runsc`) · SQLite · garak / promptfoo
 
 ---
 
@@ -94,6 +94,9 @@ sentinel/
 │   ├── main.py                    # FastAPI app factory + endpoints, admin-token guard
 │   ├── models.py                  # pydantic request/response types
 │   ├── netwarn.py                 # startup warning when the bind address is non-loopback
+│   ├── limits.py                  # SQLite-backed rate-limit counters, auth lockout, agent quarantine
+│   ├── serve.py                   # `python -m sentinel` launcher with built-in TLS
+│   ├── __main__.py                # entry point for `python -m sentinel`
 │   ├── pipeline.py                # ties L1 + L2 together, writes every decision to L5
 │   ├── input_filter/              # L1
 │   │   ├── rules.py               # injection regexes (EN/ES/FR/DE/IT/RU), homoglyph + leetspeak folding, base64/hex/ROT13 
@@ -139,7 +142,7 @@ sentinel/
 ├── tests/
 │   ├── unit/                      # test_core, test_l3_l4, test_l5, test_classifier, test_opa, test_approvals,
 │   │                              # test_revocation, test_agent_auth, test_netwarn, test_rules_false_positives,
-│   │                              # test_proxy, test_proxy_anthropic, test_proxy_stream
+│   │                              # test_limits, test_quarantine, test_proxy, test_proxy_anthropic, test_proxy_stream
 │   └── redteam/
 │       ├── cases/injection.yaml   # attacks (36), benign text (28), known gaps (25) and known false positives (17)
 │       ├── test_injection_corpus.py
@@ -325,7 +328,7 @@ Behaviour you should know:
 pytest
 ```
 
-The `opa`-backed integration test in `tests/unit/test_opa.py` is skipped when the `opa` binary is not on PATH. A full run reports 268 passed, 1 skipped (the OPA test) and 42 xfailed: the 25 known gaps and 17 known false positives in the red-team corpus, which are expected to fail (section 11).
+The `opa`-backed integration test in `tests/unit/test_opa.py` is skipped when the `opa` binary is not on PATH. A full run reports 281 passed, 1 skipped (the OPA test) and 42 xfailed: the 25 known gaps and 17 known false positives in the red-team corpus, which are expected to fail (section 11).
 
 ### 10. Alerts (L5)
 
