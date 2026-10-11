@@ -30,6 +30,8 @@ import os
 import time
 from datetime import datetime, timezone
 
+from sentinel.limits import LimitStore
+
 MIN_LEN = 16
 _HEADERS = ("x-sentinel-agent-token", "authorization", "x-api-key")
 
@@ -76,40 +78,28 @@ def _parse_file(path: str) -> dict[str, list]:
 class FailureLimiter:
     """Blocks a client after `max_failures` invalid tokens within `window` seconds, for `lockout` seconds.
     Keyed by client address, not agent, so an attacker cannot lock a legitimate agent out by guessing its name.
-    Behind a reverse proxy every caller shares the proxy's address; enforce per-client limits there as well."""
+    Behind a reverse proxy every caller shares the proxy's address; enforce per-client limits there as well.
+    State lives in `store` (SQLite when a path is given), so lockouts survive a restart."""
 
-    def __init__(self, max_failures: int = 10, window: float = 60.0, lockout: float = 300.0, clock=time.monotonic):
+    def __init__(self, max_failures: int = 10, window: float = 60.0, lockout: float = 300.0, clock=time.time,
+                 store: LimitStore | None = None):
         self.max_failures, self.window, self.lockout, self.clock = max_failures, window, lockout, clock
-        self._fails: dict[str, list[float]] = {}
-        self._locked: dict[str, float] = {}
+        self.store = store or LimitStore()
 
     def retry_after(self, client: str) -> int:
         """Seconds the client must wait (0 = not locked out)."""
-        until = self._locked.get(client)
-        if until is None:
-            return 0
-        left = until - self.clock()
-        if left <= 0:
-            del self._locked[client]
-            return 0
-        return int(left) + 1
+        now = self.clock()
+        left = self.store.locked_until(client, now) - now
+        return int(left) + 1 if left > 0 else 0
 
     def failure(self, client: str) -> None:
-        now = self.clock()
-        if len(self._fails) > 4096:  # bound memory under a many-address spray
-            self._fails = {k: v for k, v in self._fails.items() if v and now - v[-1] < self.window}
-            self._locked = {k: u for k, u in self._locked.items() if u > now}
-        hits = [t for t in self._fails.get(client, []) if now - t < self.window] + [now]
-        self._fails[client] = hits
-        if len(hits) >= self.max_failures:
-            self._locked[client] = now + self.lockout
-            self._fails.pop(client, None)
+        self.store.record_failure(client, self.max_failures, self.window, self.lockout, self.clock())
 
     @classmethod
-    def from_env(cls) -> "FailureLimiter":
+    def from_env(cls, store: LimitStore | None = None) -> "FailureLimiter":
         return cls(int(os.getenv("SENTINEL_AUTH_MAX_FAILURES", "10")),
                    float(os.getenv("SENTINEL_AUTH_FAILURE_WINDOW", "60")),
-                   float(os.getenv("SENTINEL_AUTH_LOCKOUT_SECONDS", "300")))
+                   float(os.getenv("SENTINEL_AUTH_LOCKOUT_SECONDS", "300")), store=store)
 
 
 class AgentAuth:

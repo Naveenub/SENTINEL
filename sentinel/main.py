@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from sentinel.auth import AgentAuth, FailureLimiter
+from sentinel.limits import LimitStore
 from sentinel.audit.alerts import log_sink, webhook_sink
 from sentinel.audit.detect import Detector
 from sentinel.audit.log import AuditLog
@@ -49,7 +50,8 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
     approvals = ApprovalStore(os.getenv("SENTINEL_APPROVAL_DB", os.getenv("SENTINEL_AUDIT_DB", "sentinel_audit.db")),
                               float(os.getenv("SENTINEL_APPROVAL_TTL", "86400")),
                               int(os.getenv("SENTINEL_APPROVAL_MAX_PENDING", "1000")))
-    engine = PolicyEngine(os.getenv("SENTINEL_POLICY", "policies/agents.yaml"), opa, approvals)
+    limits = LimitStore(os.getenv("SENTINEL_LIMITS_DB", os.getenv("SENTINEL_AUDIT_DB", "sentinel_audit.db")))
+    engine = PolicyEngine(os.getenv("SENTINEL_POLICY", "policies/agents.yaml"), opa, approvals, limits)
     detector = Detector(learn=int(os.getenv("SENTINEL_LEARN_CALLS", "50")),
                         call_limit=int(os.getenv("SENTINEL_CALL_LIMIT", "60")),
                         deny_limit=int(os.getenv("SENTINEL_DENY_LIMIT", "10")),
@@ -95,7 +97,7 @@ def create_app(sandbox: Sandbox | None = None, classifier=None, opa=None, model_
         def __init__(self, status: int, code: str, msg: str, api: str | None, retry_after: int = 0):
             self.status, self.code, self.msg, self.api, self.retry_after = status, code, msg, api, retry_after
 
-    limiter = FailureLimiter.from_env()
+    limiter = FailureLimiter.from_env(limits)
     app.state.limiter = limiter
 
     @app.exception_handler(_AuthFail)

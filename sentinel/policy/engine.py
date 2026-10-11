@@ -3,11 +3,11 @@ import json
 import secrets
 import threading
 import time
-from collections import defaultdict, deque
 
 import yaml
 from jsonschema import Draft202012Validator
 
+from sentinel.limits import LimitStore
 from sentinel.models import ToolDecision
 from sentinel.policy.approvals import ApprovalStore
 from sentinel.policy.hosts import extract_hosts
@@ -28,7 +28,8 @@ def _fp(agent: str, tool: str, args: dict) -> str:
 class PolicyEngine:
     """Deny-by-default. Order: allowlist -> arg schema -> rate limit -> human approval."""
 
-    def __init__(self, path: str, opa=None, approvals: ApprovalStore | None = None):
+    def __init__(self, path: str, opa=None, approvals: ApprovalStore | None = None,
+                 limits: LimitStore | None = None):
         with open(path) as f:
             cfg = yaml.safe_load(f) or {}
         self._opa = opa  # None = YAML decides; else OPA must also allow (see policy/opa.py)
@@ -71,7 +72,7 @@ class PolicyEngine:
                     "rate": _rate(spec["rate_limit"]) if "rate_limit" in spec else None,
                     "approval": spec.get("approval") == "required",
                 }
-        self._hits: dict[tuple[str, str], deque] = defaultdict(deque)
+        self._limits = limits or LimitStore()  # in-memory unless the caller passes a persistent store
         self._approvals = approvals or ApprovalStore()  # in-memory unless the caller passes a persistent store
         self._lock = threading.Lock()
 
@@ -128,12 +129,8 @@ class PolicyEngine:
         with self._lock:
             if spec["rate"]:
                 n, window = spec["rate"]
-                q, now = self._hits[(agent, tool)], time.monotonic()
-                while q and now - q[0] > window:
-                    q.popleft()
-                if len(q) >= n:
+                if not self._limits.rate_hit(f"{agent}\x00{tool}", n, window, time.time()):
                     return ToolDecision(decision="deny", reason="rate limit exceeded")
-                q.append(now)
             if not need_approval:
                 return ToolDecision(decision="allow", reason="policy ok")
             fp = _fp(agent, tool, args)

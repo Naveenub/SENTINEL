@@ -71,13 +71,14 @@ def call(c, args, aid=None):
                                               "approval_id": aid}).json()
 
 
-def test_pending_and_granted_approvals_survive_restart(env):
+def test_pending_and_granted_approvals_survive_restart(env, tmp_path):
     c1 = TestClient(create_app())
     pending = call(c1, {"cmd": "ls"})
     granted = call(c1, {"cmd": "pwd"})
     assert pending["decision"] == granted["decision"] == "pending"
     assert c1.post(f"/v1/approvals/{granted['approval_id']}/approve", headers=ADMIN).status_code == 200
 
+    env.setenv("SENTINEL_LIMITS_DB", str(tmp_path / "fresh-limits.db"))  # rate budget is not under test here
     c2 = TestClient(create_app())                                       # "restart": new app, same DB file
     assert [p["approval_id"] for p in c2.get("/v1/approvals", headers=ADMIN).json()] == [pending["approval_id"]]
     assert call(c2, {"cmd": "ls"}, pending["approval_id"])["decision"] == "pending"
