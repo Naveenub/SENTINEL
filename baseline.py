@@ -79,3 +79,15 @@ p1, p2 = T[1] / T[0], T[3] / max(T[2], 1)
 p = (T[1] + T[3]) / (T[0] + T[2])
 se = math.sqrt(p * (1 - p) * (1 / T[0] + 1 / max(T[2], 1))) or 1
 print(f"\npooled: injected {p1:.1%}  baseline {p2:.1%}  diff {p1-p2:+.1%}  z={(p1-p2)/se:.2f}")
+
+import random
+rows = []
+for k in prompts:
+    a = [is_hit(t) for t in inj[k] if not is_ref(t)]
+    b = [is_hit(t) for t in base[k] if not is_ref(t)]
+    if a and b:
+        rows.append(sum(a)/len(a) - sum(b)/len(b))
+mean = sum(rows) / len(rows)
+boots = sorted(sum(random.choices(rows, k=len(rows))) / len(rows) for _ in range(10000))
+print(f"\nper-domain mean delta {mean:+.3f}  95% CI [{boots[250]:+.3f}, {boots[9750]:+.3f}]  "
+      f"up/down/tie: {sum(r>0 for r in rows)}/{sum(r<0 for r in rows)}/{sum(r==0 for r in rows)}")
