@@ -592,7 +592,26 @@ To rerun, start the model server and follow "Reproducing the runs" in the docume
 | OPA | Optional L2 decision backend (section 12), tested against a real OPA server |
 | Regulated-industry expectations | Fail-closed defaults, separation of duties (agents cannot approve), single-use bound approvals, tamper-evident audit, content hashed in logs by default |
 
-Known limits: Prompt Guard 2 is measured on the red-team corpus only (see the status note); the NIM backend is still unmeasured, the garak baseline covers only two probes on a 1B model, and a classifier is itself attackable, so keep L2 to L4 in place. Alerts only notify unless you opt in to quarantine with `SENTINEL_ALERT_BLOCK` (section 10). Per-tool `allowed_hosts` checks URLs inside args only, not bare hostnames. Learning periods are call-count based unless `SENTINEL_LEARN_SECONDS` is set (section 10). The rule-based L1 only catches the patterns and languages listed in section 8; use the classifier hook for everything else. Two narrow benign exemptions exist (a short capitalised `System:`/`Assistant:` value that has a digit or is followed by another `Label: value` line and contains no directive words; and "you can/may/should ignore/skip the previous instructions in the README/docs if/when/unless ..."). They are intentionally strict, so close variants such as a lone `System: Dell XPS` line still block, and an attacker who phrases an override exactly in the advice form scoped to a document would pass the rule layer. Tokens are signed bearer tokens capped at 5 minutes; revocation is enforced only for verifiers that call `/v1/token/verify` (offline verification with the shared key cannot see it) and services must trust the SENTINEL key. The model proxy streams only in buffered mode (no latency benefit) and does not scan non-text content (set `non_text: block` per agent to refuse it). The egress proxy is HTTPS-only. Credential detection is pattern-based, so unknown formats can slip through. HMAC signing is symmetric and tail truncation of the log is not detectable from the file alone (anchor `head` off-box for stronger guarantees). Agent-facing endpoints have no auth unless you set `SENTINEL_AGENT_TOKENS` (section 15); without it, bind to localhost or put them behind your own network controls. Agent tokens are bearer secrets (serve TLS with `python -m sentinel`, or put TLS in front; `SENTINEL_REQUIRE_TLS=1` enforces it), expiry is opt-in per token (`SENTINEL_REQUIRE_TOKEN_EXPIRY=1` enforces it), and lockout is per client address.
+
+## Known limits
+
+What SENTINEL does not do today and what to do about it. "Planned" means it is on the roadmap below.
+
+| Area | Limit | Workaround | Planned |
+|---|---|---|---|
+| L1 rules | Only the patterns and languages in section 8 are caught; the corpus pins 25 known gaps and 17 known false positives (section 11) | Enable a classifier backend (`SENTINEL_CLASSIFIER`) and keep L2 to L4 in place | Yes |
+| L1 rules | Two narrow benign exemptions exist: a short capitalised `System:`/`Assistant:` value that has a digit or is followed by another `Label: value` line and contains no directive words; and "you can/may/should ignore/skip the previous instructions in the README/docs if/when/unless ...". They are strict (a lone `System: Dell XPS` line still blocks), but an override phrased exactly in the advice form, scoped to a document, would pass the rules | Use a classifier backend | No |
+| L1 classifier | Prompt Guard 2 is measured on the red-team corpus only; the NIM backend is unmeasured; a classifier is itself attackable | Keep L2 to L4 in place | Yes (NIM measurement) |
+| garak | Baseline covers two probes on a 1B model; `encoding` and `latentinjection` not run | Run a fuller profile with a classifier enabled | Yes |
+| L2 policy | `allowed_hosts` checks URLs inside args only, not bare hostnames | Do not rely on it for tools that take a hostname as a plain argument; add an OPA rule or a schema `pattern` | Yes |
+| L3 egress | The egress proxy is HTTPS-only | Route other protocols through your own controls | Yes |
+| L3 sandbox | Not verified against a real container runtime in the build environment | Run `scripts/sandbox_smoke.py` on your host (section 5) | No |
+| L4 tokens | Signed bearer tokens capped at 5 minutes; revocation is enforced only for verifiers that call `/v1/token/verify` (offline verification with the shared key cannot see it); services must trust the SENTINEL key | Verify through the gateway (section 13) | No |
+| L4 scanner | Credential detection is pattern-based, so unknown formats can slip through | Add patterns for your own key formats | No |
+| L5 audit | HMAC signing is symmetric, and tail truncation of the log is not detectable from the file alone | Anchor `head` off-box (copy the latest entry hash to separate storage) | Yes |
+| L5 alerts | Alerts only notify unless you opt in to quarantine with `SENTINEL_ALERT_BLOCK` (section 10); learning periods are call-count based unless `SENTINEL_LEARN_SECONDS` is set | Set both for stricter behaviour | No |
+| Model proxy | Streaming is buffered only (no latency benefit); non-text content is not scanned | Set `non_text: block` per agent to refuse it (section 14) | Yes (non-text scanning) |
+| Auth | Agent endpoints have no auth unless `SENTINEL_AGENT_TOKENS` is set; tokens are bearer secrets; expiry is opt-in (`SENTINEL_REQUIRE_TOKEN_EXPIRY=1` enforces it); lockout is per client address | Bind to localhost, serve TLS, set tokens (sections 15 and 16) | No |
 
 ---
 
@@ -608,6 +627,10 @@ Known limits: Prompt Guard 2 is measured on the red-team corpus only (see the st
 | Done | Prompt Guard 2 measured on the red-team corpus (86M: 12/25 gaps caught, +1 benign FP; 22M: 3/25) |
 | Done | garak baseline, direct vs proxy, on a small probe set (see the status note) |
 | Done | Injection study on llama3.2:1b with replication and neutral-text control (section 17, `docs/injection_eval.md`) |
+| Next | `allowed_hosts` for bare hostnames (not only URLs) in tool args |
+| Next | Make audit-log tail truncation detectable (signed head checkpoints exported off-box) |
+| Next | Model proxy: scan or extract text from non-text content instead of pass-through or block |
+| Next | Egress proxy: protocols beyond HTTPS |
 | Next | Measure the NIM backend (needs an NVIDIA GPU); run the full garak spec (encoding, latentinjection) on a larger model |
 
 ## Design principles
