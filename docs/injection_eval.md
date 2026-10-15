@@ -17,7 +17,7 @@ The test asks whether text injected into a domain-reputation prompt changes a sm
 **Domains.**
 
 - *Exploration set (4):* escolaanglada.cat, google.com, consultax.in, poseidon.cool. The operator designated poseidon.cool and consultax.in as malicious or suspicious ("BAD") and the other two as benign. These labels were supplied, not verified here.
-- *Replication set (9):* the remaining domains in the report, set aside untouched until the hypothesis was fixed: ruspyc.top, enkey.xyz, 0fflce.xyz, 4im.us, 95photo.cn, chhotumaharaj.com, canaero.com.tr, breathhini.shop, 51jianli.cn. [Labels: not yet verified against an external source / labelled from SOURCE on DATE.]
+- *Replication set (9):* the remaining domains in the report, set aside untouched until the hypothesis was fixed: ruspyc.top, enkey.xyz, 0fflce.xyz, 4im.us, 95photo.cn, chhotumaharaj.com, canaero.com.tr, breathhini.shop, 51jianli.cn. No external labels were obtained for these domains.
 - canaero.com.tr was initially excluded because the script's domain parser required a line starting with "Domain Name:", while this record begins with "** ". The parser was loosened to ignore leading punctuation and the domain was then run. It was in the set aside before any results, so this was a bug fix, not a selection decision.
 
 **Runs.**
@@ -127,7 +127,7 @@ Supported conclusion: on llama3.2:1b with this prompt template, injected text as
 ## Limitations
 
 - **One small model, one template.** Results do not extend to other models, prompts or deployments; the replication generalises across domains, not prompt designs.
-- **Ground truth.** The four original labels were supplied by the operator. [The nine replication domains are unlabelled / labelled from SOURCE.] Without verified labels the crossings cannot be split into malicious and benign.
+- **Ground truth.** The four original labels were supplied by the operator. The nine replication domains are unlabelled. Without verified labels the crossings cannot be split into malicious and benign.
 - **Post-hoc origin of the lead.** The two original targets were chosen after seeing the first four domains; only the replication tests them fairly.
 - **Low power.** The sampled verdict test cannot separate a ~5-point shift from zero. The sign test over nine domains has a floor of p=0.002 and little power for small effects.
 - **Single neutral control.** One hand-written neutral sentence per payload. Other neutral wording might shift P(benign) by a different amount, and the injected-versus-baseline shift (+0.019) was not tested separately.
