@@ -49,3 +49,4 @@ for k, (i, r) in enumerate(todo, 1):
     labels[i] = a
     json.dump(labels, open(out, "w"), indent=1)
 print(f"\nsaved {len(labels)}/{len(sample)} labels to {out}")
+
