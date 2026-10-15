@@ -26,7 +26,8 @@ def new(t):
              re.search(r"relatively secure|do not believe|no (indication|evidence)", h, re.I))
     return b and not bool(MAL.search(NEGMAL.sub("", h)))
 
-rows = {f'{r["key"]}:{r["n"]}': r for r in map(json.loads, open(sys.argv[1]))}
+ARM = sys.argv[sys.argv.index("--arm") + 1] if "--arm" in sys.argv else "base"
+rows = {f'{r["key"]}:{r["n"]}': r for r in map(json.loads, open(sys.argv[1])) if r["arm"] == ARM}
 labels = json.load(open(sys.argv[2]))
 ids = [i for i in labels if i in rows]
 truth = {i: labels[i] == "b" for i in ids}

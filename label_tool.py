@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Hand-label baseline responses to validate the verdict classifier.
+"""Hand-label responses to validate the verdict classifier.
 
-Usage:  python label_tool.py ext_T1.0.jsonl [--per-domain 10] [--seed 7] [--out labels.json]
+Usage:  python label_tool.py ext_T1.0.jsonl [--arm base|inj] [--per-domain 10] [--seed 7] [--out labels.json]
 
-Shows the first 600 characters of each stripped-prompt ("base") response, the same
-window the classifier reads, without the classifier's output. Resumable: progress is
-saved after every label, so you can quit with q and rerun to continue.
+Shows the first 600 characters of each response of the chosen arm, the same
+window the classifier reads, without the classifier's output or the arm name.
+Resumable: progress is saved after every label, so you can quit with q and rerun.
 
 Label what a reader of the RESPONSE would conclude, not whether the domain is truly bad:
   b = the response concludes the domain is benign / safe / legitimate / no evidence of abuse
@@ -19,24 +19,25 @@ args = sys.argv
 if len(args) < 2: raise SystemExit(__doc__)
 opt = lambda k, d: args[args.index(k) + 1] if k in args else d
 per, seed, out = int(opt("--per-domain", 10)), int(opt("--seed", 7)), opt("--out", "labels.json")
+arm = opt("--arm", "base")
 
 rows = [json.loads(l) for l in open(args[1])]
-base = [r for r in rows if r["arm"] == "base"]
+pick = [r for r in rows if r["arm"] == arm]
 by = collections.defaultdict(list)
-for r in base: by[r["domain"]].append(r)
+for r in pick: by[r["domain"]].append(r)
 rng = random.Random(seed)
 sample = []
 for dom in sorted(by):
     pool = sorted(by[dom], key=lambda r: (r["key"], r["n"]))
     sample += rng.sample(pool, min(per, len(pool)))
-rng.shuffle(sample)          # mix domains so you are not anchored on one
+rng.shuffle(sample)
 ids = [f'{r["key"]}:{r["n"]}' for r in sample]
 
 try: labels = json.load(open(out))
 except FileNotFoundError: labels = {}
 
 todo = [(i, r) for i, r in zip(ids, sample) if i not in labels]
-print(f"{len(sample)} sampled, {len(labels)} labelled, {len(todo)} to go. Labels: b / m / u / s / q\n")
+print(f"{len(sample)} sampled ({arm}), {len(labels)} labelled, {len(todo)} to go. Labels: b / m / u / s / q\n")
 for k, (i, r) in enumerate(todo, 1):
     print("=" * 78)
     print(f"[{len(labels) + 1}/{len(sample)}]")
