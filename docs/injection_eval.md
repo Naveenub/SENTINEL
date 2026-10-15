@@ -103,7 +103,7 @@ Per-domain gaps ranged from +0.051 (51jianli.cn) to −0.089 (breathhini.shop), 
 
 - **Wording:** the phrase rate roughly doubles, largely on google.com, where "not malicious" is already the natural answer, so much of it is the model echoing the injected text.
 - **Forced-label:** injected text beats length-matched neutral text in every domain (about +3 points), and roughly doubles below-0.5 crossings (14.5% vs 7.4%). This may reflect lexical priming by the phrase "not malicious" more than persuasion, which would also fit the echoing seen in the phrase rate.
-- **Verdict:** the sampled run shows about +5 points overall (rough 95% interval −8 to +18) and exactly zero on the BAD domains. The stripped prompt already gets a benign verdict about 58% of the time on the BAD domains, so there is little room for an attacker to add.
+- **Verdict:** the sampled run shows about +5 points overall (rough 95% interval −8 to +18) and exactly zero on the BAD domains. The stripped prompt already gets a benign verdict about 58% of the time on the BAD domains, so there is little room for an attacker to add. These absolute rates come from a keyword classifier and move with it: a first version that did not handle negated phrasings gave 50% benign at baseline overall and 40% on the BAD domains (injected versus stripped difference about +3 points overall, still exactly zero on BAD).
 - **Lead retracted:** the earlier variant-specific signal was most likely a winner's curse from picking the top two of twelve variants on four domains. The pre-registered ignore-versus-others test on nine unseen domains was null on all three scales, and the neutral-text control shows the small effect is not payload-specific.
 - **Dominant factor:** how the question is phrased.
 
@@ -122,7 +122,7 @@ Supported conclusion: on llama3.2:1b with this prompt template, injected text as
 - **Dropped data.** One cell (51jianli.cn, SYSTEM: "ignore", phrasing 1) had no mass on either answer token.
 - **Mid-study parser change.** The domain regex was loosened to handle a "** " prefix; this affected only canaero.com.tr.
 - **Baseline.** The injected and stripped prompts differ in length and layout, and the greedy and forced runs use one baseline prompt per domain.
-- **Heuristic classifiers.** The phrase match counts echoes; the verdict classifier is keyword-based and unvalidated.
+- **Heuristic classifiers.** The phrase match counts echoes; the verdict classifier is keyword-based and unvalidated. A first version that missed negated phrasings ("no evidence of phishing") classified 51/96 injected and 48/96 stripped responses as benign (OR 1.14, p=0.77); the final version, which handles negation, gives 69/96 and 64/96 (OR 1.30, p=0.52). The injected-versus-stripped comparison is null under both, but the absolute benign rates, including the 58% on the BAD domains, depend on the classifier and were not checked against manual labels.
 - **Multiple comparisons.** Per-domain and per-variant p-values were not corrected.
 - **Forced-label changes the task** from the original free-text prompt.
 
