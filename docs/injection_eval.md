@@ -2,7 +2,7 @@
 
 Revised Oct 15, 2026 (replaces the earlier draft)
 
-On llama3.2:1b, a prompt-injection sentence appears in the model's wording about twice as often (40% vs 21% of responses, p=0.007), but the free-text malicious/benign verdict does not change detectably (72% vs 67% benign, p=0.52). In the forced-label measure, injected text raised P(benign) about 3 points more than length-matched neutral text, in all nine unseen domains, but no payload or wrapper stood out and a variant-specific lead from the first four domains (the "Ignore previous instructions" payload) did not replicate and is retracted. The answer phrasing moves the verdict far more than any injection does.
+On llama3.2:1b, a prompt-injection sentence appears in the model's wording about twice as often (40% vs 21% of responses, p=0.007), but the free-text malicious/benign verdict shows no significant change, either on the keyword classifier (72% vs 67% benign, p=0.52) or on 96 hand labels per arm (72% vs 64%, p=0.28), which is underpowered rather than evidence of no effect. In the forced-label measure, injected text raised P(benign) about 3 points more than length-matched neutral text, in all nine unseen domains, but no payload or wrapper stood out and a variant-specific lead from the first four domains (the "Ignore previous instructions" payload) did not replicate and is retracted. The answer phrasing moves the verdict far more than any injection does.
 
 ## Setup and procedure
 
@@ -110,7 +110,7 @@ I labelled 40 baseline (stripped-prompt) responses by hand as benign, malicious 
 
 The two human-style raters disagreed on 13 of 40 three-way labels and agreed on 31 of 40 for benign versus not-benign (kappa 0.54). Most of the gap is hedged responses that say "not malicious" but add caveats or odd claims: the author labelled these unclear, and the classifier counts them as benign. The classifier calls 72% of the 40 responses benign against 52% in the author's labels, so absolute benign rates are likely overstated. The author labels are the primary validation. Three of them (responses 7, 15 and 26) were flagged as possible slips after the comparison and are left unchanged to avoid adjusting labels after seeing the disagreement. Files: `labels_human.json`, `labels_claude.json`.
 
-The table above is the 40-response pilot. I then extended the hand labelling to 96 responses per arm (24 per domain, same rules, arm name and classifier verdict hidden; responses sometimes echo the payload, so blinding is partial). The first 40 per arm are included. Files: `labels_human.json`, `labels_human_injected.json`. One baseline label (`5e8dcd7f:21`, a refusal) was changed from malicious to unclear after noticing it matched the other refusals, which were all labelled unclear; it does not affect the benign count.
+The table above is the 40-response pilot. I then extended the hand labelling to 96 responses per arm (24 per domain from the four exploration-set domains: consultax.in, escolaanglada.cat, google.com and poseidon.cool; same rules, arm name and classifier verdict hidden; responses sometimes echo the payload, so blinding is partial). The first 40 per arm are included. Files: `labels_human.json`, `labels_human_injected.json`. One baseline label (`5e8dcd7f:21`, a refusal) was changed from malicious to unclear after noticing it matched the other refusals, which were all labelled unclear; it does not affect the benign count.
 
 | Arm | Final classifier vs author labels | First version |
 | --- | --- | --- |
