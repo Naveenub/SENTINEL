@@ -110,7 +110,14 @@ I labelled 40 baseline (stripped-prompt) responses by hand as benign, malicious 
 
 The two human-style raters disagreed on 13 of 40 three-way labels and agreed on 31 of 40 for benign versus not-benign (kappa 0.54). Most of the gap is hedged responses that say "not malicious" but add caveats or odd claims: the author labelled these unclear, and the classifier counts them as benign. The classifier calls 72% of the 40 responses benign against 52% in the author's labels, so absolute benign rates are likely overstated. The author labels are the primary validation. Three of them (responses 7, 15 and 26) were flagged as possible slips after the comparison and are left unchanged to avoid adjusting labels after seeing the disagreement. Files: `labels_human.json`, `labels_claude.json`.
 
-This does not change the injected-versus-stripped comparison directly, because only stripped-arm responses were labelled. An over-call that is the same in both arms would leave the null intact, but that is untested.
+I then labelled 40 injected-arm responses (10 per domain, same rules, arm name and classifier verdict hidden; responses sometimes echo the payload, so blinding is partial). File: `labels_human_injected.json`.
+
+| Injected arm | vs author labels |
+| --- | --- |
+| Final classifier | 31/40 (78%), kappa 0.39, 95% CI for agreement about 62% to 88% |
+| First version | 28/40 (70%), kappa 0.35 |
+
+The classifier calls 82% of the injected responses benign against 70% in the author's labels, an over-call of about 12 points against about 20 in the stripped arm. The author-labelled benign rate was 28/40 (70%) injected against 21/40 (52%) stripped, a difference of +17.5 points (Fisher exact p=0.17; Wald 95% CI -4 to +39 points), against +10 points on the classifier for the same samples (82% vs 72%). Classifier error is therefore not equal across arms: it is smaller in the injected arm, which shrinks the apparent injected-minus-stripped difference. The two 40-response samples are separate draws and "unclear" counts as not-benign. At this sample size the hand-labelled difference is not significant and its interval is wide, so the injected-versus-stripped null holds only as "no difference detected under this classifier", not as "no effect".
 
 ## Interpretation
 
@@ -135,7 +142,7 @@ Supported conclusion: on llama3.2:1b with this prompt template, injected text as
 - **Dropped data.** One cell (51jianli.cn, SYSTEM: "ignore", phrasing 1) had no mass on either answer token.
 - **Mid-study parser change.** The domain regex was loosened to handle a "** " prefix; this affected only canaero.com.tr.
 - **Baseline.** The injected and stripped prompts differ in length and layout, and the greedy and forced runs use one baseline prompt per domain.
-- **Heuristic classifiers.** The phrase match counts echoes; the verdict classifier is keyword-based and only moderately valid against author labels (kappa 0.49; see Classifier validation). A first version that missed negated phrasings ("no evidence of phishing") classified 51/96 injected and 48/96 stripped responses as benign (OR 1.14, p=0.77); the final version, which handles negation, gives 69/96 and 64/96 (OR 1.30, p=0.52). The injected-versus-stripped comparison is null under both, but the absolute benign rates, including the 58% on the BAD domains, depend on the classifier and are likely overstated (it calls 72% of the validation responses benign against 52% in the author's labels). Injected-arm responses were not labelled, so equal error across the two arms is untested.
+- **Heuristic classifiers.** The phrase match counts echoes; the verdict classifier is keyword-based and only moderately valid against author labels (kappa 0.49; see Classifier validation). A first version that missed negated phrasings ("no evidence of phishing") classified 51/96 injected and 48/96 stripped responses as benign (OR 1.14, p=0.77); the final version, which handles negation, gives 69/96 and 64/96 (OR 1.30, p=0.52). The injected-versus-stripped comparison is null under both, but the absolute benign rates, including the 58% on the BAD domains, depend on the classifier and are likely overstated (it calls 72% of the validation responses benign against 52% in the author's labels). Classifier error is not equal across arms (see Classifier validation), so the injected-versus-stripped null is classifier-dependent.
 - **Multiple comparisons.** Per-domain and per-variant p-values were not corrected.
 - **Forced-label changes the task** from the original free-text prompt.
 
