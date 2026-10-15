@@ -15,7 +15,7 @@ A defense gateway that sits between **untrusted input**, the **model**, and **to
 > [!WARNING]
 > **Do not expose SENTINEL beyond localhost without agent auth *and* TLS.** With auth off (the default) every agent-facing endpoint trusts any caller that can reach the port. With auth on, tokens are bearer secrets sent in cleartext unless you terminate TLS. On startup SENTINEL logs a boxed warning if it detects a non-loopback bind (`--host 0.0.0.0` etc.); see section 15.
 
-> **Status:** all five layers are built and tested: 217 unit tests (218 with the `opa` binary on PATH) plus a 64-case red-team corpus (36 attacks blocked, 28 benign allowed). The corpus also pins **25 known detection gaps and 17 known false positives** of the rule layer as strict expected failures (section 11), so the rules alone are not complete. promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
+> **Status:** all five layers are built and tested: the suite reports 281 passed, 1 skipped and 42 xfailed (the skipped test is the OPA integration test, which runs when the `opa` binary is on PATH). That includes a 64-case red-team corpus (36 attacks blocked, 28 benign allowed). The corpus also pins **25 known detection gaps and 17 known false positives** of the rule layer as strict expected failures (section 11), so the rules alone are not complete. promptfoo was run against the live gateway (8/8). CI is written but has not been run on GitHub yet.
 >
 > Prompt Guard 2 (86M) has been measured on the red-team corpus (CPU, threshold 0.8): it catches 12 of the 25 known rule gaps (multilingual overrides, template spoofs, DAN-style, prompt extraction) and adds one benign false positive (the README-advice exemption). It misses instruction-shaped attacks without jailbreak phrasing (tool calls, file reads, exfiltration). Scores are near-binary, so the threshold has little effect between 0.2 and 0.9. The English-only 22M model is weaker (3 of 25 at 0.8, no new benign false positive) and is not recommended. The NIM backend remains unmeasured.
 >
@@ -136,6 +136,7 @@ sentinel/
 │   ├── approve.py                 # CLI: list / approve / deny pending actions
 │   ├── eval_classifier.py         # measure rules + classifier on the red-team corpus
 │   ├── garak_scan.sh              # garak against the model directly vs through SENTINEL
+│   ├── sweep_threshold.py         # score the red-team corpus with the configured classifier and sweep the threshold
 │   ├── sandbox_smoke.py           # L3 smoke test: drives the real Sandbox runner on a host with Docker (optionally gVisor)
 │   ├── verify_log.py              # CLI: verify audit chain offline
 │   └── verify_thinking_loop.py    # live check: extended-thinking tool loop + redacted_thinking: strip (needs a real Anthropic upstream)
@@ -147,8 +148,16 @@ sentinel/
 │       ├── cases/injection.yaml   # attacks (36), benign text (28), known gaps (25) and known false positives (17)
 │       ├── test_injection_corpus.py
 │       └── promptfooconfig.yaml   # same attacks through the live gateway via promptfoo
-└── .github/workflows/ci.yml       # pytest, then gateway + promptfoo
+├── docs/
+│   └── injection_eval.md          # study: does injected text move a small local model's verdict (section 17)
+├── baseline.py, extend.py, forced.py, forced2.py, forced2_rep.py, noise_control.py   # study runners (section 17)
+├── analyze_ext.py, analyze_v2.py, analyze_v3.py, domain_summary.py, strict.py        # study analysis
+├── label_tool.py, label_agree.py, make_second_sheet.py, second_agree.py              # hand-labelling and agreement
+├── *.jsonl, labels_*.json, baseline_result.txt                                       # study data and labels
+└── .github/workflows/ci.yml       # opa test, pytest, then gateway + promptfoo
 ```
+
+The root-level scripts and data files belong to the injection study in section 17. They are not part of the gateway and the `sentinel` package does not import them.
 
 ---
 
@@ -168,7 +177,7 @@ The gateway refuses to start without both values. Keep the admin token away from
 
 ### 2. Define what each agent may do
 
-Edit `policies/agents.yaml`. Anything not listed is denied, and every tool must have a JSON Schema.
+Edit `policies/agents.yaml` (or point `SENTINEL_POLICY` at another file). Anything not listed is denied, and every tool must have a JSON Schema.
 
 ```yaml
 agents:
@@ -311,6 +320,7 @@ export SENTINEL_CLASSIFIER=prompt_guard          # or nim, or nim,prompt_guard (
 export SENTINEL_CLASSIFIER_ON_ERROR=closed       # default
 curl -H "X-Sentinel-Admin-Token: $SENTINEL_ADMIN_TOKEN" localhost:8080/v1/status   # shows which classifier is active
 python scripts/eval_classifier.py                # measure it on the red-team corpus
+python scripts/sweep_threshold.py [--csv scores.csv]   # raw model scores on the corpus, swept over thresholds (calls the backend directly, no rules)
 ```
 
 Behaviour you should know:
@@ -319,7 +329,7 @@ Behaviour you should know:
 - **Long documents are scored in full** in overlapping windows (Prompt Guard has a ~512-token window). Input that would need more than the chunk limit (default 32) is treated as an error, not truncated, because truncation is an evasion route. Raise `SENTINEL_NIM_MAX_CHUNKS` / `SENTINEL_PG_MAX_CHUNKS` if you handle large pages.
 - **Cost:** every item goes through the model, and ensembles run all members. Expect added latency per scan.
 - **Data:** with `nim`, document text goes to wherever `SENTINEL_NIM_URL` points. It defaults to localhost; do not point it at a hosted endpoint for sensitive content.
-- NIM tuning: `SENTINEL_NIM_TIMEOUT` (seconds, default 5), `SENTINEL_NIM_MAX_CHARS` (window size, default 4000), `SENTINEL_NIM_MODEL` (only needed behind NeMo's NIM Proxy). These are read by the code but not listed in `.env.example`.
+- NIM tuning: `SENTINEL_NIM_TIMEOUT` (seconds, default 5), `SENTINEL_NIM_MAX_CHARS` (window size, default 4000), `SENTINEL_NIM_MODEL` (only needed behind NeMo's NIM Proxy). These are read by the code but not listed in `.env.example`. `SENTINEL_NIM_API_KEY` is sent to the NIM if set. For `prompt_guard`, `SENTINEL_PG_MODEL` (default `meta-llama/Llama-Prompt-Guard-2-86M`), `SENTINEL_PG_DEVICE` (e.g. `0` for the first GPU) and `SENTINEL_PG_MAX_CHUNKS` (default 32) tune the local model.
 - Scores at or above `SENTINEL_CLASSIFIER_THRESHOLD` (default 0.8) are a high-severity finding. For `nim` the score is 1.0 or 0.0 from its boolean verdict. The NIM's own score field is not interpreted.
 
 ### 9. Test
@@ -336,8 +346,8 @@ Every audit event is watched. Alerts are written back into the signed log as `al
 
 | Rule | Fires when |
 |---|---|
-| `deny_spike` | many denied calls from one agent in a minute |
-| `call_spike` | too many tool calls in a minute |
+| `deny_spike` | many denied calls from one agent in a minute (`SENTINEL_DENY_LIMIT`, default 10) |
+| `call_spike` | too many tool calls in a minute (`SENTINEL_CALL_LIMIT`, default 60) |
 | `tool_after_blocked_input` | an agent requests a tool right after its input was blocked as an injection |
 | `output_withheld` | a tool's output was withheld (credentials or injection in output) |
 | `new_domain` | first request to a host, after the agent's learning period |
@@ -395,6 +405,8 @@ export SENTINEL_POLICY_BACKEND=opa SENTINEL_OPA_URL=http://127.0.0.1:8181
 opa test policies/opa -v
 ```
 
+Other OPA settings: `SENTINEL_OPA_PATH` (default `sentinel/authz/decision`), `SENTINEL_OPA_TIMEOUT` (seconds, default 2) and `SENTINEL_OPA_TOKEN` (bearer token for the OPA server, empty by default).
+
 OPA receives `{agent, tool, args, hosts}` and returns `data.sentinel.authz.decision = {effect: allow|deny|approve, reason}`.
 
 - **Strictest wins.** Schema, YAML `allowed_hosts` and `approval: required` still apply; OPA can only add restrictions or require approval. A tool must exist in YAML, so OPA cannot invent one.
@@ -418,6 +430,8 @@ OpenAI(base_url="http://127.0.0.1:8080/proxy/research-bot/v1", api_key="unused")
 Anthropic(base_url="http://127.0.0.1:8080/proxy/research-bot", api_key="unused")        # /v1/messages
 # or POST /v1/chat/completions | /v1/messages on the gateway root with header X-Sentinel-Agent: research-bot
 ```
+
+Proxy settings: `SENTINEL_PROXY_BLOCK_MODE` (`error`, the default, or `refusal`), `SENTINEL_PROXY_TOOLCALLS` (`enforce`, the default, or `off` to skip preflight of model-proposed tool calls) and `SENTINEL_PROXY_STREAM` (`buffered`, the default, or `reject`).
 
 The upstream must speak the format you call (the proxy does not translate between them). The agent's own `Authorization` / `x-api-key` / `anthropic-beta` headers are never forwarded; `anthropic-version` is (default `2023-06-01`).
 
@@ -552,6 +566,19 @@ server {
 
 **Health checks.** `/healthz` needs a valid agent or admin token (section 15), so probes that cannot send headers cannot use it. Probe through a client that can send `X-Sentinel-Admin-Token`.
 
+### 17. Injection evaluation study (research notes, separate from the gateway)
+
+`docs/injection_eval.md` reports an experiment on whether text injected into a domain-reputation prompt changes a small local model's assessment. It uses `llama3.2:1b` served by Ollama at `127.0.0.1:11434`, prompts taken from a garak `latentinjection.LatentWhois` run, and 13 domains (4 exploration, 9 replication). The scripts query the model directly, so **SENTINEL is not in the path** and the results say nothing about what the gateway blocks.
+
+Headline findings (revised Oct 15, 2026; see the document for methods, tables and limitations):
+
+- Injected text roughly doubles how often the reply contains "not malicious" (40% vs 21%, p=0.007), partly because the model echoes the payload.
+- The free-text benign verdict shows no significant change: 72% vs 67% on the keyword classifier (p=0.52) and 72% vs 64% on 96 hand labels per arm (p=0.28), which is underpowered rather than evidence of no effect.
+- In the forced-label measure, injected text raised P(benign) about 3 points more than length-matched neutral text, in all nine unseen domains. No payload or wrapper stood out, and an earlier lead for the "Ignore previous instructions" payload did not replicate and is retracted.
+- How the answer is phrased moves the verdict far more than any injection does.
+
+To rerun, start the model server and follow "Reproducing the runs" in the document. The runners read a garak report from `~/.local/share/garak/garak_runs/garak_sentinel_capped.report.jsonl`, which is not in the repo. The `.jsonl` and `labels_*.json` files in the repo root are the outputs and hand labels from the reported runs.
+
 ---
 
 ## Integrations and standards
@@ -580,6 +607,7 @@ Known limits: Prompt Guard 2 is measured on the red-team corpus only (see the st
 | Next | Close the 25 known detection gaps and 17 known false positives in the red-team corpus (the ML backends are the intended fix for the gaps) |
 | Done | Prompt Guard 2 measured on the red-team corpus (86M: 12/25 gaps caught, +1 benign FP; 22M: 3/25) |
 | Done | garak baseline, direct vs proxy, on a small probe set (see the status note) |
+| Done | Injection study on llama3.2:1b with replication and neutral-text control (section 17, `docs/injection_eval.md`) |
 | Next | Measure the NIM backend (needs an NVIDIA GPU); run the full garak spec (encoding, latentinjection) on a larger model |
 
 ## Design principles
