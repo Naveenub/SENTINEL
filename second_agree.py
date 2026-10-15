@@ -13,7 +13,7 @@ def kappa(pairs):
     return po, (po - pe) / (1 - pe) if pe < 1 else float("nan")
 
 pairs = [(author[key[i]], second[i]) for i in key]
-assert all(b in "bmu" for _, b in pairs), "unfilled or invalid labels"
+assert all(b in ("b", "m", "u") for _, b in pairs), "unfilled or invalid labels"
 po, k3 = kappa(pairs)
 bin_pairs = [(a == "b", b == "b") for a, b in pairs]
 pb, kb = kappa(bin_pairs)
