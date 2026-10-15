@@ -106,7 +106,7 @@ I labelled 40 baseline (stripped-prompt) responses by hand as benign, malicious 
 | | vs author labels | vs Claude labels |
 | --- | --- | --- |
 | Final classifier | 30/40 (75%), kappa 0.49, 95% CI for agreement about 60% to 86% | 39/40 (98%), kappa 0.94 |
-| First version (no negation handling) | 29/40 (72%), kappa 0.45 | 32/40 (80%) |
+| First version (no negation handling) | 29/40 (72%), kappa 0.45 | 32/40 (80%), kappa 0.60 |
 
 The two human-style raters disagreed on 13 of 40 three-way labels and agreed on 31 of 40 for benign versus not-benign (kappa 0.54). Most of the gap is hedged responses that say "not malicious" but add caveats or odd claims: the author labelled these unclear, and the classifier counts them as benign. The classifier calls 72% of the 40 responses benign against 52% in the author's labels, so absolute benign rates are likely overstated. The author labels are the primary validation. Three of them (responses 7, 15 and 26) were flagged as possible slips after the comparison and are left unchanged to avoid adjusting labels after seeing the disagreement. Files: `labels_human.json`, `labels_claude.json`.
 
