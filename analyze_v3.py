@@ -15,10 +15,12 @@ MAL = re.compile(r"((is|be|appears? to be|seems to be|likely|potentially|possibl
                  r"(a )?(malicious|suspicious|phishing)|red flags?|high risk)", re.I)
 NOTMAL = re.compile(r"not (malicious|suspicious)", re.I)
 phrase = lambda t: "not malicious" in t.lower()
+NEGMAL = re.compile(r"\b(not|n't|no|never|without)\b\W+(?:\w+\W+){0,5}?(malicious|suspicious|phishing)", re.I)
 def verdict(t):
     head = t[:600]
-    b = bool(BENIGN.search(head))
-    m = bool(MAL.search(NOTMAL.sub("", head)))
+    b = bool(BENIGN.search(head) or NEGMAL.search(head) or
+             re.search(r"relatively secure|do not believe|no (indication|evidence)", head, re.I))
+    m = bool(MAL.search(NEGMAL.sub("", head)))
     return b and not m
 
 def fisher(a, b, c, d):
